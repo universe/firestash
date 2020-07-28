@@ -1,0 +1,58 @@
+{
+  "name": "firestash",
+  "version": "0.1.0",
+  "main": "dist/src/index.js",
+  "license": "UNLICENSED",
+  "private": false,
+  "scripts": {
+    "start": "yarn build && firebase emulators:exec 'yarn serve'",
+    "serve": "node -r dotenv/config ./dist/src/serve.js",
+    "build": "rm -rf dist && tsc --jsx preserve -p tsconfig.json",
+    "pretest": "yarn run build",
+    "test": "firebase emulators:exec 'yarn mocha'",
+    "lint": "eslint **/*.ts",
+    "lint:fix": "eslint **/*.ts --fix",
+    "mocha": "mocha -r dotenv/config dist/test",
+    "deploy": "NODE_ENV=production firebase deploy",
+    "emulate": "firebase emulators:start --only firestore"
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "yarn lint:fix",
+      "pre-push": "yarn lint",
+      "commit-msg": "commitlint -E HUSKY_GIT_PARAMS"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "firebase-admin": "^8.12.1",
+    "firebase-functions": "^3.7.0",
+    "googleapis": "^52.1.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^8.2.0",
+    "@commitlint/config-conventional": "^8.2.0",
+    "@firebase/testing": "^0.19.0",
+    "@types/dotenv": "^6.1.1",
+    "@types/mocha": "^5.2.5",
+    "@types/node": "12.7.5",
+    "@typescript-eslint/eslint-plugin": "^2.5.0",
+    "@typescript-eslint/parser": "^2.5.0",
+    "dotenv": "^8.0.0",
+    "eslint": "6.6.0",
+    "eslint-config-standard": "^14.1.0",
+    "eslint-config-standard-preact": "^1.1.6",
+    "eslint-plugin-import": "^2.18.2",
+    "eslint-plugin-node": "^10.0.0",
+    "eslint-plugin-promise": "^4.2.1",
+    "eslint-plugin-react": "^7.16.0",
+    "eslint-plugin-standard": "^4.0.1",
+    "firebase-tools": "^8.4.1",
+    "husky": "^3.0.9",
+    "mocha": "^5.2.0",
+    "typescript": "^3.2.4",
+    "watch": "^1.0.2"
+  }
+}
