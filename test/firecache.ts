@@ -17,7 +17,7 @@ describe('Connector', function() {
     const fireStash = new FireStash(fireTest as unknown as typeof Firebase, app as unknown as Firebase.app.App, __dirname);
 
     afterEach(async function() {
-      fireStash.unwatch();
+      await fireStash.unwatch();
       await fireTest.clearFirestoreData({ projectId });
     });
 
@@ -79,12 +79,18 @@ describe('Connector', function() {
       assert.deepStrictEqual(Object.keys((await fireStash.get('collection')).cache).length, 20000, 'Writes an obscene amount of data.');
       const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection').get();
       assert.deepStrictEqual(dat.docs.length, 1, '20,000 keys and below stay in a single page.');
-      fireStash.update('collection', `id${20001}`);
+      fireStash.update('collection', `id${20000}`);
       await fireStash.allSettled();
-      const dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection').get();
+      let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection').get();
       assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 20,000 keys');
-      const page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-      const page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+      let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+      let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+      assert.ok(page0Count === 20000, 'Initial cache overflows are simply append only.');
+      assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
+      await fireStash.rebalance();
+      dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection').get();
+      page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+      page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
       assert.ok((Math.abs(page0Count - page1Count) / 20000) * 100 < 3, 'Pages re-balance with less than 3% error.');
     });
 
