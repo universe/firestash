@@ -1,11 +1,11 @@
 import Firebase from 'firebase-admin';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
-import * as fs from 'fs';
+import * as fs from 'fs-extra';
 import * as path from 'path';
 import { clearTimeout } from 'timers';
-
-const numId = (id: string) => [...crypto.createHash('md5').update(id).digest().values()].reduce((a, b) => a + b);
+import levelup, { LevelUp } from 'levelup';
+import rocksdb from 'rocksdb';
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -13,7 +13,35 @@ declare global {
     /* eslint-disable-next-line */
     allSettled(promises: Array<Promise<any>>): Promise<Array<{status: 'fulfilled' | 'rejected'; value?: any; reason?: any}>>;
   }
+
+  /* eslint-disable-next-line @typescript-eslint/no-namespace */
+  namespace NodeJS {
+    interface ProcessEnv {
+      NODE_ENV: 'development' | 'production';
+      FIRESTASH_PAGINATION: number | undefined;
+    }
+  }
 }
+
+const numId = (id: string) => [...crypto.createHash('md5').update(id).digest().values()].reduce((a, b) => a + b);
+
+const PAGINATION = 20000;
+function pageSize(): number {
+  return process.env.FIRESTASH_PAGINATION || PAGINATION;
+}
+
+/* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+export const debounce = <F extends (...args: any) => any>(func: F, timeout: number) => {
+  let ref: NodeJS.Timeout;
+  let promise: Promise<ReturnType<F>> | undefined;
+  let finish: (val: ReturnType<F>) => void;
+  return function(this: ThisParameterType<F>, ...args: Parameters<F>): Promise<ReturnType<F>> {
+    promise = promise || new Promise((resolve) => finish = resolve);
+    clearTimeout(ref);
+    ref = setTimeout(() => (promise = undefined) || finish(func.apply(this, args)), timeout);
+    return promise;
+  };
+};
 
 export interface IFireStash<T = number> {
   collection: string;
@@ -28,10 +56,10 @@ export default class FireStash extends EventEmitter {
   dir: string | null;
   log: typeof console;
   watchers: Map<string, () => void> = new Map();
-  local: Map<string, Record<string, IFireStash>> = new Map();
   remote: Map<string, Record<string, IFireStash>> = new Map();
   timeout: NodeJS.Timeout | null = null;
   timeoutPromise: Promise<void> = Promise.resolve();
+  level: LevelUp | null = null;
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -46,6 +74,10 @@ export default class FireStash extends EventEmitter {
     this.db = this.app.firestore();
     this.dir = directory;
     this.log = console;
+    if (this.dir) {
+      fs.mkdirSync(this.dir, { recursive: true });
+      this.level = levelup(rocksdb(path.join(this.dir, '.firestash')));
+    }
   }
 
   /**
@@ -85,7 +117,7 @@ export default class FireStash extends EventEmitter {
           documentCount += 1;
 
           // Expand the cache object pages to fit the page count balance.
-          while (pageCount < Math.ceil(documentCount / 20000)) {
+          while (pageCount < Math.ceil(documentCount / pageSize())) {
             const pageName = this.cacheKey(collection, pageCount);
             await this.db.doc(pageName).set({ collection, cache: {} }, { merge: true });
             remote[pageName] = { collection, cache: {} };
@@ -93,7 +125,23 @@ export default class FireStash extends EventEmitter {
           }
 
           // Calculate the page we're adding to. In re-balance this is a md5 hash as decimal, mod page size, but on insert we just append to the last page present.
-          const page = pageCount - 1;
+          let page = pageCount - 1;
+
+          // Check to make sure this key doesn't already exist on remote. If it does, use its existing page.
+          // TODO: Perf? This is potentially a lot of looping.
+          const hasPageNum = numId(key) % pageCount;
+          if (remote[this.cacheKey(collection, hasPageNum)].cache[key]) {
+            page = hasPageNum;
+          }
+          else {
+            let i = 0;
+            for (const dat of Object.values(remote)) {
+              if (dat.cache[key]) { page = i; break; }
+              i++;
+            }
+          }
+
+          // Get our final cache page destination.
           const pageName = this.cacheKey(collection, page);
 
           // If this page does not exist in our update yet, add one extra write to our count for ensuring the collection name.
@@ -103,7 +151,7 @@ export default class FireStash extends EventEmitter {
           const update: IFireStash<FirebaseFirestore.FieldValue> = updates[pageName] = updates[pageName] || { collection, cache: {} };
           update.cache[key] = FieldValue.increment(1);
 
-          // Keep local in sync.
+          // Keep local copy of remote stash in sync.
           remote[pageName] = remote[pageName] || { collection, cache: {} };
           remote[pageName] && (remote[pageName].cache[key] = (remote[pageName]?.cache[key] || 0) + 1);
 
@@ -149,14 +197,36 @@ export default class FireStash extends EventEmitter {
    * @param collection Collection Path
    * @param data IFireStash map of updates
    */
-  private mergeRemote(collection: string, data: Record<string, IFireStash>) {
+  private async mergeRemote(collection: string, data: Record<string, IFireStash>) {
     this.remote.set(collection, data);
-    this.emit(collection, this.get(collection));
-    if (this.dir) {
-      const dir = path.join(this.dir, collection);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, '.firecache'), JSON.stringify(data));
+    const modified = [];
+    if (this.level) {
+      let local: Record<string, IFireStash> = {};
+      const batch = this.level.batch();
+      try { local = JSON.parse(await this.level.get(collection, { asBuffer: false })); }
+      catch (_err) {}
+      /* eslint-disable-next-line */
+      const promises: Promise<any>[] = [];
+      for (const [ page, stash ] of Object.entries(data)) {
+        local[page] = local[page] || { collection, cache: {} };
+        for (const [ id, value ] of Object.entries(stash.cache)) {
+          if (local[page].cache[id] === value) { continue; }
+          modified.push(id);
+          promises.push(this.db.doc(`${collection}/${id}`).get().then((doc) => {
+            local[page].cache[id] = value;
+            return batch.put(`${collection}/${id}`, JSON.stringify(doc.data() || {}));
+          }));
+        }
+      }
+      batch.put(collection, JSON.stringify(data));
+      await Promise.allSettled(promises);
+      await batch.write();
     }
+    const updated = this.get(collection);
+    for (const id of modified) {
+      this.emit(`${collection}/${id}`, updated[id]);
+    }
+    this.emit(collection, updated);
   }
 
   /**
@@ -166,14 +236,14 @@ export default class FireStash extends EventEmitter {
   async watch(collection: string): Promise<() => void> {
     return this.watchers.get(collection) || new Promise((resolve, reject) => {
       let firstCall: boolean | void = true;
-      const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot((update) => {
+      const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot(debounce((update) => {
         const data: Record<string, IFireStash> = { [this.cacheKey(collection, 0)]: { collection, cache: {} } };
         for (const dat of update.docs) {
           data[`firestash/${dat.id}`] = dat.data() as IFireStash;
         }
         this.mergeRemote(collection, data);
         firstCall && (firstCall = resolve(unsubscribe));
-      }, reject);
+      }, 300), reject);
       this.watchers.set(collection, unsubscribe);
     });
   }
@@ -182,24 +252,51 @@ export default class FireStash extends EventEmitter {
    * Finish the last update and disconnect all watchers and timeouts.
    */
   async unwatch() {
-    await this.allSettled();
     for (const unsubscribe of this.watchers.values()) {
       unsubscribe();
     }
-    this.remote = new Map();
+    await this.allSettled();
     this.timeout && clearTimeout(this.timeout);
     this.timeout = null;
+    this.remote = new Map();
   }
 
   /**
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
    */
-  async get(collection: string) {
+  async stash(collection: string): Promise<IFireStash> {
     if (!this.watchers.has(collection)) { await this.watch(collection); }
     const out: IFireStash = { collection, cache: {} };
     for (const dat of Object.values(this.remote.get(collection) || {})) {
       Object.assign(out.cache, dat.cache);
+    }
+    return out;
+  }
+
+  /**
+   * Get the entire stash cache for a collection.
+   * @param collection Collection Path
+   */
+  /* eslint-disable no-dupe-class-members */
+  async get<T=object>(collection: string): Promise<Record<string, T | undefined>>;
+  async get<T=object>(collection: string, id: string): Promise<T | null>;
+  async get<T=object>(collection: string, id?: string): Promise<Record<string, T | undefined> | T | null> {
+  /* eslint-enable no-dupe-class-members */
+    if (id) {
+      try {
+        return JSON.parse(await this.level?.get(`${collection}/${id}`, { asBuffer: false })) as T;
+      }
+      catch (_err) {
+        return null;
+      }
+    }
+    const stash = await this.stash(collection);
+    const out: Record<string, T> = {};
+    for (const key of Object.keys(stash.cache)) {
+      const record = await this.get<T>(collection, key);
+      if (!record) { continue; }
+      out[key] = record;
     }
     return out;
   }
@@ -242,7 +339,7 @@ export default class FireStash extends EventEmitter {
   async ensure(collection: string) {
     // Ensure we are watching for remote updates.
     if (!this.watchers.has(collection)) { await this.watch(collection); }
-    const stash = (await this.get(collection)) || { collection, cache: {} };
+    const stash = (await this.stash(collection)) || { collection, cache: {} };
     const docs = (await this.db.collection(collection).get()).docs;
     for (const doc of docs) {
       if (stash.cache[doc.id]) { continue; }
@@ -267,7 +364,7 @@ export default class FireStash extends EventEmitter {
     for (const dat of Object.values(data)) {
       count += Object.keys(dat.cache).length;
     }
-    const pageCount = Math.ceil(count / 20000);
+    const pageCount = Math.ceil(count / pageSize());
     const updates: Record<string, IFireStash<FirebaseFirestore.FieldValue | number>> = {};
     const remote = this.remote.get(collection) || { [this.cacheKey(collection, 0)]: { collection, cache: {} } };
     this.remote.set(collection, remote);
