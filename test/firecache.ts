@@ -84,9 +84,9 @@ describe('Connector', function() {
     it('shards massive caches within one collection', async function() {
       this.timeout(60000);
 
-      fireStash.on('commit', () => console.log('commit'));
-      fireStash.on('re-balance', () => console.log('re-balance'));
-      fireStash.on('settled', () => console.log('settled'));
+      // fireStash.on('commit', () => console.log('commit'));
+      // fireStash.on('balance', () => console.log('balance'));
+      // fireStash.on('settled', () => console.log('settled'));
 
       const cache = {};
       for (let i = 0; i < 20000; i++) {
@@ -105,7 +105,7 @@ describe('Connector', function() {
       let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
       assert.ok(page0Count === 20000, 'Initial cache overflows are simply append only.');
       assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
-      await fireStash.rebalance();
+      await fireStash.balance('collection');
       dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection').get();
       page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
       page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
@@ -130,6 +130,44 @@ describe('Connector', function() {
       assert.strictEqual(i, 5, 'Throttles large multi-collection writes in batches of 500');
       assert.deepStrictEqual(await fireStash.get('collection0'), { collection: 'collection0', cache: { id0: 1 } }, 'Throttles cache writes');
       assert.deepStrictEqual(await fireStash.get('collection999'), { collection: 'collection999', cache: { id999: 1 } }, 'Throttles cache writes');
+    });
+
+    it('bust increments all previously known ids', async function() {
+      this.timeout(30000);
+
+      await fireStash.db.doc('collection/foo').set({ a: 1 });
+      await fireStash.db.doc('collection/bar').set({ b: 2 });
+      await fireStash.db.doc('collection/biz').set({ c: 3 });
+      fireStash.update('collection', 'foo');
+      fireStash.update('collection', 'bar');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 1, bar: 1 } }, 'Initial cache correct');
+      await fireStash.bust('collection');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 2, bar: 2 } }, 'Known cache busted');
+      await fireStash.db.doc('collection/baz').set({ c: 3 });
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 2, bar: 2 } }, 'Known cache busted');
+      await fireStash.bust('collection');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 3, bar: 3 } }, 'Known cache busted');
+      await fireStash.update('collection', 'biz');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 3, bar: 3, biz: 1 } }, 'Known cache busted');
+      await fireStash.bust('collection');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 4, bar: 4, biz: 2 } }, 'Known cache busted');
+    });
+
+    it('ensure generates a new stash from scratch', async function() {
+      this.timeout(3000);
+
+      await fireStash.db.doc('collection/foo').set({ a: 1 });
+      await fireStash.db.doc('collection/bar').set({ b: 2 });
+      await fireStash.db.doc('collection/biz').set({ c: 3 });
+
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: {} }, 'No cache initially');
+      await fireStash.ensure('collection');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 1, bar: 1, biz: 1 } }, 'Full cache after ensure');
+      await fireStash.db.doc('collection/baz').set({ d: 4 });
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 1, bar: 1, biz: 1 } }, 'Cache unchanged after bare addition');
+      await fireStash.ensure('collection');
+      assert.deepStrictEqual(await fireStash.get('collection'), { collection: 'collection', cache: { foo: 1, bar: 1, biz: 1, baz: 1 } }, 'Missing key added after ensure');
     });
   });
 });
