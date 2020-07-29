@@ -49,7 +49,7 @@ export default class FireCache extends EventEmitter {
     this.log = console;
   }
 
-  private cacheKey(collection: string, page: number) { return `firestash/${collection.replace(/\//g, '.')}-${page}`; }
+  private cacheKey(collection: string, page: number) { return `firestash/${collection}-${page}`; }
 
   private async saveCacheUpdate() {
     this.timeout = null;
@@ -60,12 +60,11 @@ export default class FireCache extends EventEmitter {
     let updates = {};
 
     try {
-      for (const [ collectionId, keys ] of this.toUpdate.entries()) {
+      for (const [ collection, keys ] of this.toUpdate.entries()) {
         // Calculate our collection cache key
-        const collection = collectionId.replace(/\//g, '.');
 
         // Ensure we are watching for remote updates.
-        if (!this.watchers.has(collectionId)) { await this.watch(collectionId); }
+        if (!this.watchers.has(collection)) { await this.watch(collection); }
 
         // Get / ensure we have the remote cache object present. Calculate the pagination.
         const remote = this.remote.get(collection) || { [this.cacheKey(collection, 0)]: { collection, cache: {} } };
@@ -120,7 +119,7 @@ export default class FireCache extends EventEmitter {
           }
         }
         // Remove collection from toUpdate when all updated.
-        this.toUpdate.delete(collectionId);
+        this.toUpdate.delete(collection);
       }
 
       // Batch write the changes.

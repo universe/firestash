@@ -33,6 +33,14 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.get('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
     });
 
+    it('is able to insert a key for sub collection', async function() {
+      this.timeout(10000);
+      fireStash.update('contacts/adam/notes', 'id1');
+      assert.deepStrictEqual(await fireStash.get('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: {} }, 'Throttles cache writes');
+      await wait(1001);
+      assert.deepStrictEqual(await fireStash.get('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
+    });
+
     it('batches multiple key updates in the same collection', async function() {
       this.timeout(10000);
       fireStash.update('contacts2', 'id1');
@@ -41,6 +49,16 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.get('contacts2'), { collection: 'contacts2', cache: {} }, 'Throttles cache writes');
       await wait(1001);
       assert.deepStrictEqual(await fireStash.get('contacts2'), { collection: 'contacts2', cache: { id1: 1, id2: 1 } }, 'Throttled cache bundles writes');
+    });
+
+    it('batches multiple key updates in the same collection for sub collection', async function() {
+      this.timeout(10000);
+      fireStash.update('contacts2/adam/notes', 'id1');
+      fireStash.update('contacts2/adam/notes', 'id1');
+      fireStash.update('contacts2/adam/notes', 'id2');
+      assert.deepStrictEqual(await fireStash.get('contacts2/adam/notes'), { collection: 'contacts2/adam/notes', cache: {} }, 'Throttles cache writes');
+      await wait(1001);
+      assert.deepStrictEqual(await fireStash.get('contacts2/adam/notes'), { collection: 'contacts2/adam/notes', cache: { id1: 1, id2: 1 } }, 'Throttled cache bundles writes');
     });
 
     it('batches massive key updates within one collection', async function() {
