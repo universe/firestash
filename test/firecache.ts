@@ -14,15 +14,15 @@ function wait(ms: number): Promise<void> {
 
 describe('Connector', function() {
   describe('it should', function() {
-    const app = fireTest.initializeAdminApp({ projectId });
+    const app = Firebase.initializeApp({ projectId });
     let appId = 0;
-    let fireStash: FireStash = new FireStash(fireTest as unknown as typeof Firebase, app as unknown as Firebase.app.App, path.join(__dirname, String(appId++)));
+    let fireStash = new FireStash(Firebase, app, path.join(__dirname, String(appId++)));
 
     afterEach(async function() {
       this.timeout(5000);
       await fireStash.unwatch();
       await fireTest.clearFirestoreData({ projectId });
-      fireStash = new FireStash(fireTest as unknown as typeof Firebase, app as unknown as Firebase.app.App, path.join(__dirname, String(appId++)));
+      fireStash = new FireStash(Firebase, app, path.join(__dirname, String(appId++)));
       await wait(300);
     });
 
@@ -31,44 +31,56 @@ describe('Connector', function() {
     });
 
     it('is able to insert a key', async function() {
-      this.timeout(10000);
       fireStash.update('contacts', 'id1');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: {} }, 'Throttles cache writes');
-      await wait(1001);
-      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
+      await wait(1300);
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in ~1s');
+    });
+
+    it('creates in-memory local db if started with no root directory', async function() {
+      const memStash = new FireStash(Firebase, app);
+      memStash.update('contacts', 'id1');
+      await memStash.allSettled();
+      assert.deepStrictEqual(await memStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
+      await memStash.unwatch();
+    });
+
+    it('only calling update does not start a watcher', async function() {
+      fireStash.update('contacts', 'id1');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(fireStash.watchers.size, 0, 'No watchers started.');
     });
 
     it('is able to insert a key for sub collection', async function() {
-      this.timeout(10000);
       fireStash.update('contacts/adam/notes', 'note1');
       assert.deepStrictEqual(await fireStash.stash('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: {} }, 'Throttles cache writes');
-      await wait(1001);
-      assert.deepStrictEqual(await fireStash.stash('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: { note1: 1 } }, 'Throttles cache writes, resolved in 1s');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: { note1: 1 } }, 'Throttles cache writes, resolved in ~1s');
     });
 
     it('batches multiple key updates in the same collection', async function() {
-      this.timeout(10000);
       fireStash.update('contacts2', 'id1');
       fireStash.update('contacts2', 'id1');
       fireStash.update('contacts2', 'id2');
       assert.deepStrictEqual(await fireStash.stash('contacts2'), { collection: 'contacts2', cache: {} }, 'Throttles cache writes');
-      await wait(1001);
-      assert.deepStrictEqual(await fireStash.stash('contacts2'), { collection: 'contacts2', cache: { id1: 1, id2: 1 } }, 'Throttled cache bundles writes');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts2'), { collection: 'contacts2', cache: { id1: 1, id2: 1 } }, 'Throttled cache bundles writes, resolved in ~1s');
     });
 
     it('batches multiple key updates in the same collection for sub collection', async function() {
-      this.timeout(10000);
       fireStash.update('contacts2/adam/notes', 'id1');
       fireStash.update('contacts2/adam/notes', 'id1');
       fireStash.update('contacts2/adam/notes', 'id2');
       assert.deepStrictEqual(await fireStash.stash('contacts2/adam/notes'), { collection: 'contacts2/adam/notes', cache: {} }, 'Throttles cache writes');
-      await wait(1001);
-      assert.deepStrictEqual(await fireStash.stash('contacts2/adam/notes'), { collection: 'contacts2/adam/notes', cache: { id1: 1, id2: 1 } }, 'Throttled cache bundles writes');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(
+        await fireStash.stash('contacts2/adam/notes'),
+        { collection: 'contacts2/adam/notes', cache: { id1: 1, id2: 1 } },
+        'Throttled cache bundles writes, resolved in ~1s',
+      );
     });
 
     it('batches large key updates within one collection', async function() {
-      this.timeout(30000);
-
       let i = 0;
       fireStash.on('save', () => { i++; });
 
@@ -87,11 +99,7 @@ describe('Connector', function() {
     });
 
     it('shards massive caches within one collection', async function() {
-      this.timeout(60000);
-
-      // fireStash.on('commit', () => console.log('commit'));
-      // fireStash.on('balance', () => console.log('balance'));
-      // fireStash.on('settled', () => console.log('settled'));
+      this.timeout(6000);
 
       const cache = {};
       for (let i = 0; i < 20000; i++) {
@@ -100,16 +108,21 @@ describe('Connector', function() {
       }
       await fireStash.allSettled();
       assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 20000, 'Writes an obscene amount of data.');
+
       const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
       assert.deepStrictEqual(dat.docs.length, 1, '20,000 keys and below stay in a single page.');
+
       fireStash.update('collection2', `id${20000}`);
       await fireStash.allSettled();
+
       let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
       assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 20,000 keys');
+
       let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
       let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
       assert.ok(page0Count === 20000, 'Initial cache overflows are simply append only.');
       assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
+
       await fireStash.balance('collection2');
       dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
       page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
@@ -118,11 +131,10 @@ describe('Connector', function() {
     });
 
     it('batches massive key updates across many collection', async function() {
-      this.timeout(60000);
+      let saveCount = 0;
+      fireStash.on('save', () => { saveCount++; });
 
-      let i = 0;
-      fireStash.on('save', () => { i++; });
-
+      console.timeStamp('Update-Calls-Start');
       // Contrived to show that we batch document updates in groups of 500 – the limit for Firestore.batch().
       for (let i = 0; i < 1000; i++) {
         fireStash.update(`collection${i}`, `id${i}`);
@@ -130,16 +142,17 @@ describe('Connector', function() {
 
       assert.deepStrictEqual(await fireStash.stash('collection0'), { collection: 'collection0', cache: {} }, 'Throttles cache writes');
       assert.deepStrictEqual(await fireStash.stash('collection999'), { collection: 'collection999', cache: {} }, 'Throttles cache writes');
-      assert.strictEqual(i, 0, 'Throttles large multi-collection writes in batches of 500, which include collection names');
+      assert.strictEqual(saveCount, 0, 'Throttles large multi-collection writes in batches of 500, which include collection names');
+
       await fireStash.allSettled();
-      assert.strictEqual(i, 5, 'Throttles large multi-collection writes in batches of 500');
+
+      assert.strictEqual(saveCount, 4, 'Throttles large multi-collection writes in batches of 500');
       assert.deepStrictEqual(await fireStash.stash('collection0'), { collection: 'collection0', cache: { id0: 1 } }, 'Throttles cache writes');
       assert.deepStrictEqual(await fireStash.stash('collection999'), { collection: 'collection999', cache: { id999: 1 } }, 'Throttles cache writes');
     });
 
     it('bust increments all previously known ids', async function() {
-      this.timeout(30000);
-      await wait(5000);
+      this.timeout(6000);
       await fireStash.db.doc('collection3/foo').set({ a: 1 });
       await fireStash.db.doc('collection3/bar').set({ b: 2 });
       await fireStash.db.doc('collection3/biz').set({ c: 3 });
@@ -148,15 +161,16 @@ describe('Connector', function() {
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 1, bar: 1 } }, 'Initial cache correct');
       await fireStash.bust('collection3');
-      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted');
+      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted 1');
       await fireStash.db.doc('collection/baz').set({ c: 3 });
-      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted');
+      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted 2');
       await fireStash.bust('collection3');
-      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 3, bar: 3 } }, 'Known cache busted');
+      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 3, bar: 3 } }, 'Known cache busted 3');
       await fireStash.update('collection3', 'biz');
-      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 3, bar: 3, biz: 1 } }, 'Known cache busted');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 3, bar: 3, biz: 1 } }, 'Known cache busted 4');
       await fireStash.bust('collection3');
-      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 4, bar: 4, biz: 2 } }, 'Known cache busted');
+      assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 4, bar: 4, biz: 2 } }, 'Known cache busted 5');
     });
 
     it('ensure generates a new stash from scratch', async function() {
@@ -176,7 +190,7 @@ describe('Connector', function() {
     });
 
     it('pagination update tests', async function() {
-      this.timeout(30000);
+      this.timeout(3000);
       process.env.FIRESTASH_PAGINATION = 10;
 
       const batch = fireStash.db.batch();
@@ -189,21 +203,19 @@ describe('Connector', function() {
 
       await batch.commit();
       await fireStash.allSettled();
-      await wait(3000);
 
-      assert.deepStrictEqual((await fireStash.stash('collection5')).cache.id50, 1, 'Updates existing cache entries on multiple pages.');
-      assert.deepStrictEqual((await fireStash.get('collection5', 'id50')), { id: 50 }, 'Updates existing cache entries on multiple pages.');
-      assert.deepStrictEqual((await fireStash.get('collection5')), collection, 'Updates existing cache entries on multiple pages.');
+      assert.deepStrictEqual((await fireStash.stash('collection5')).cache.id50, 1, 'Updates existing cache entries on multiple pages 1.');
+      assert.deepStrictEqual((await fireStash.get('collection5', 'id50')), { id: 50 }, 'Updates existing cache entries on multiple pages 2.');
+      assert.deepStrictEqual((await fireStash.get('collection5')), collection, 'Updates existing cache entries on multiple pages 3.');
 
       await fireStash.db.doc('collection5/id50').set({ id: 500 });
       await fireStash.update('collection5', 'id50');
       await fireStash.allSettled();
-      await wait(3000);
-      collection.id50.id = 500;
 
-      assert.deepStrictEqual((await fireStash.stash('collection5')).cache.id50, 2, 'Updates existing cache entries on multiple pages.');
-      assert.deepStrictEqual((await fireStash.get('collection5', 'id50')), { id: 500 }, 'Updates existing cache entries on multiple pages.');
-      assert.deepStrictEqual((await fireStash.get('collection5')), collection, 'Updates existing cache entries on multiple pages.');
+      collection.id50.id = 500;
+      assert.deepStrictEqual((await fireStash.stash('collection5')).cache.id50, 2, 'Updates existing cache entries on multiple pages 4.');
+      assert.deepStrictEqual((await fireStash.get('collection5', 'id50')), { id: 500 }, 'Updates existing cache entries on multiple pages 5.');
+      assert.deepStrictEqual((await fireStash.get('collection5')), collection, 'Updates existing cache entries on multiple pages 6.');
 
       process.env.FIRESTASH_PAGINATION = undefined;
     });
