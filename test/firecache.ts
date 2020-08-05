@@ -60,6 +60,81 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.stash('contacts/adam/notes'), { collection: 'contacts/adam/notes', cache: { note1: 1 } }, 'Throttles cache writes, resolved in ~1s');
     });
 
+    it('is able to update a key with an object to cache', async function() {
+      const fetches: string[] = [];
+      fireStash.on('fetch', (collection, id) => {
+        fetches.push(`${collection}/${id}`);
+      });
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      fireStash.db.doc('contacts/2').set({ biz: 'baz' });
+      fireStash.update('contacts', '2');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' }, 2: { biz: 'baz' } }, 'Gets all data');
+      assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
+    });
+
+    it('handles multiple updates the same key and object', async function() {
+      const fetches: string[] = [];
+      fireStash.on('fetch', (collection, id) => {
+        fetches.push(`${collection}/${id}`);
+      });
+      fireStash.update('contacts', '1', { foo: 'bar', deep: { zip: 'zap' }, arr: [ 1, 2 ] });
+      fireStash.update('contacts', '1', { biz: 'baz', deep: { zoop: 'zop' }, arr: [ 3, 4 ] });
+      const expected = {
+        foo: 'bar',
+        biz: 'baz',
+        deep: {
+          zip: 'zap',
+          zoop: 'zop',
+        },
+        arr: [ 3, 4 ],
+      };
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
+      assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
+      assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary');
+    });
+
+    it('one update with no content will force sync with remote', async function() {
+      const fetches: string[] = [];
+      fireStash.on('fetch', (collection, id) => {
+        fetches.push(`${collection}/${id}`);
+      });
+      fireStash.update('contacts', '1', { foo: 'bar', deep: { zip: 'zap' }, arr: [ 1, 2 ] });
+      fireStash.update('contacts', '1', { biz: 'baz', deep: { zoop: 'zop' }, arr: [ 3, 4 ] });
+      fireStash.update('contacts', '1');
+      const expected = {
+        foo: 'bar',
+        biz: 'baz',
+        deep: {
+          zip: 'zap',
+          zoop: 'zop',
+        },
+        arr: [ 3, 4 ],
+      };
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
+      assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
+      assert.deepStrictEqual(fetches, ['contacts/1'], 'Fetches only what is necessary');
+    });
+
+    it('is able to update deep collection keys with an object to cache', async function() {
+      const fetches: string[] = [];
+      fireStash.on('fetch', (collection, id) => {
+        fetches.push(`${collection}/${id}`);
+      });
+      fireStash.update('contacts/1/phones', '1234567890', { foo: 'bar' });
+      fireStash.db.doc('contacts/1/phones/0987654321').set({ biz: 'baz' });
+      fireStash.update('contacts/1/phones', '0987654321');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts/1/phones'), { collection: 'contacts/1/phones', cache: { 1234567890: 1, '0987654321': 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts/1/phones'), { 1234567890: { foo: 'bar' }, '0987654321': { biz: 'baz' } }, 'Gets all data');
+      assert.deepStrictEqual(fetches, ['contacts/1/phones/0987654321'], 'Fetches only what is necessary');
+    });
+
     it('batches multiple key updates in the same collection', async function() {
       fireStash.update('contacts2', 'id1');
       fireStash.update('contacts2', 'id1');
@@ -104,13 +179,26 @@ describe('Connector', function() {
       this.timeout(6000);
 
       const cache = {};
+      const objects = {};
+      const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
+      let batch = fireStash.db.batch();
       for (let i = 0; i < 25000; i++) {
         fireStash.update('collection2', `id${i}`);
+        batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
         cache[`id${i}`] = 1;
+        objects[`collection2/id${i}`] = { id: i };
+        if (i % 500 === 0) {
+          promises.push(batch.commit());
+          batch = fireStash.db.batch();
+        }
       }
+      promises.push(batch.commit());
+      await Promise.allSettled(promises);
       await fireStash.allSettled();
       assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 25000, 'Writes an obscene amount of data.');
-
+      const res = await fireStash.get('collection2');
+      assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 25000, 'Fetches an obscene amount of data keys.');
+      assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 25000, 'Fetches an obscene amount of data values.');
       const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
       assert.deepStrictEqual(dat.docs.length, 1, '20,000 keys and below stay in a single page.');
 
@@ -136,7 +224,6 @@ describe('Connector', function() {
       let saveCount = 0;
       fireStash.on('save', () => { saveCount++; });
 
-      console.timeStamp('Update-Calls-Start');
       // Contrived to show that we batch document updates in groups of 500 – the limit for Firestore.batch().
       for (let i = 0; i < 1000; i++) {
         fireStash.update(`collection${i}`, `id${i}`);

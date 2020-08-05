@@ -8,6 +8,7 @@ import levelup, { LevelUp } from 'levelup';
 import encoding from 'encoding-down';
 import rocksdb from 'rocksdb';
 import memdown from 'memdown';
+import * as deepMerge from 'deepmerge';
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -25,6 +26,8 @@ declare global {
   }
 }
 
+/* eslint-disable-next-line */
+const overwriteMerge = (_destinationArray: any[], sourceArray: any[]) => sourceArray;
 const numId = (id: string) => [...crypto.createHash('md5').update(id).digest().values()].reduce((a, b) => a + b);
 
 // We base64 encode page keys to safely represent deep collections, who's paths contain '/', in a flat list.
@@ -40,6 +43,10 @@ function pageSize(): number {
   return process.env.FIRESTASH_PAGINATION || PAGINATION;
 }
 
+interface InternalStash {
+  __dirty__?: true;
+}
+
 export interface IFireStash<T = number> {
   collection: string;
   cache: Record<string, T>;
@@ -50,7 +57,7 @@ export interface IFireStash<T = number> {
 // }
 
 export default class FireStash extends EventEmitter {
-  toUpdate: Map<string, Set<string>> = new Map();
+  toUpdate: Map<string, Map<string, (object | null)[]>> = new Map();
   firebase: typeof Firebase;
   app: Firebase.app.App;
   db: Firebase.firestore.Firestore;
@@ -125,6 +132,7 @@ export default class FireStash extends EventEmitter {
     const promises: Promise<any>[] = [];
     let count = 0;
     let updates = {};
+    let batch = this.db.batch();
     const localBatch = this.level.batch();
     const collections = [...this.toUpdate.keys()];
     const collectionStashes: Map<string, Record<string, IFireStash | undefined>> = new Map();
@@ -180,7 +188,7 @@ export default class FireStash extends EventEmitter {
         }
 
         // For each key queued, set the cache object.
-        for (const key of keys.values()) {
+        for (const [ key, objects ] of keys.entries()) {
           // Increment our document count to trigger page overflows in batched writes.
           documentCount += 1;
 
@@ -216,32 +224,44 @@ export default class FireStash extends EventEmitter {
           // If this page does not exist in our update yet, add one extra write to our count for ensuring the collection name.
           if (!updates[pageName]) { count++; }
 
-          // Update remote.
+          // Update remote object.
           const update: IFireStash<FirebaseFirestore.FieldValue> = updates[pageName] = updates[pageName] || { collection, cache: {} };
           update.cache[key] = FieldValue.increment(1);
+          count += 1; // +1 for increment call.
 
           // Keep our local stash in sync to prevent unnessicary object syncs down the line.
           const page = localStash[pageName] = localStash[pageName] || { collection, cache: {} };
           page.cache[key] = (page.cache[key] || 0) + 1;
 
+          // For each object we've been asked to update (run at least once even if no object was presented)...
+          let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
+          for (const obj of objects.length ? objects : [null]) {
+            if (obj) {
+              batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
+              localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+              count += 1; // +1 for object merge
+            }
+            else {
+              localObj.__dirty__ = true;
+            }
+
+            // If we've hit the 500 write limit, batch write these objects.
+            if (count >= 498) {
+              for (const pageName of Object.keys(updates)) {
+                batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
+              }
+              promises.push(batch.commit());
+              this.emit('save');
+              updates = {};
+              count = 0;
+              batch = this.db.batch();
+            }
+          }
+          localObj && localBatch.put(`${collection}/${key}`, localObj);
+
           // Optimistically remove this key
           // TODO: Only remove after confirmed batch?
           keys.delete(key);
-
-          // If we've hit the 500 write limit, batch write these objects.
-          if (count++ >= 498) {
-            const batch = this.db.batch();
-            for (const pageName of Object.keys(updates)) {
-              batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
-            }
-            promises.push(batch.commit());
-            this.emit('save');
-            updates = {};
-            count = 0;
-          }
-
-          // TODO: Instead of deleting and re-fetching over the wire, provide an edit interface to fully wrap firestore.
-          localBatch.del(`${collection}/${key}`);
         }
 
         // Queue a commit of our collection's local state.
@@ -250,7 +270,6 @@ export default class FireStash extends EventEmitter {
       }
 
       // Batch write the changes.
-      const batch = this.db.batch();
       for (const pageName of Object.keys(updates)) {
         batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
       }
@@ -291,25 +310,27 @@ export default class FireStash extends EventEmitter {
       data[page] = stash;
       const localPage = local[page] = local[page] || { collection, cache: {} };
       for (const [ id, value ] of Object.entries(stash.cache)) {
-        if (localPage.cache[id] === value) { continue; }
+        // If we have both the same cache generation id, and the actual object present, continue.
+        if (localPage.cache[id] === value && !(await this.safeGet<object & InternalStash>(collection, id))?.__dirty__) { continue; }
         localPage.cache[id] = value;
         modified.push(`${collection}/${id}`);
       }
     }
 
+    // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
     const batch = this.level.batch();
     batch.put(collection, local);
     this.stashPagesMemo[collection] = local;
-    for (const doc of modified) {
-      batch.del(doc);
-    }
+    for (const doc of modified) { batch.del(doc); }
     await batch.write();
 
-    // const updated = await this.get(collection);
-    for (const doc of modified) {
-      this.emit(doc);
-    }
-    this.emit(collection);
+    // Destroy our memoized get() request if it exists for everything that has changed to ensure we fetch latest on next call.
+    for (const doc of modified) { this.getRequestsMemo.delete(doc); }
+    if (modified.length) { this.getRequestsMemo.delete(collection); }
+
+    // Trigger our events!
+    for (const doc of modified) { this.emit(doc); }
+    if (modified.length) { this.emit(collection); }
   }
 
   /**
@@ -362,6 +383,54 @@ export default class FireStash extends EventEmitter {
     }
   }
 
+  private async safeGetAll<T=object>(collection: string, idSet: Set<string>): Promise<FirebaseFirestore.DocumentSnapshot<T>[]> {
+    // Fetch all our updated documents.
+    const start = Date.now();
+    const documents: FirebaseFirestore.DocumentSnapshot<T>[] = [];
+    let requestPageSize = 500;
+    let missCount = 0;
+    // Retry getAll fetches at least three times. getAll in firebase is unreliable.
+    // You'll get most of the object very quickly, but some may take a second request.
+    while (idSet.size && requestPageSize > 1) {
+      const ids = [...idSet];
+      this.log.info(`[FireCache] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
+      const promises: Promise<FirebaseFirestore.DocumentSnapshot<T>[]>[] = [];
+      for (let i = 0; i < Math.ceil(ids.length / requestPageSize); i++) {
+        const p = this.db.getAll(
+          ...ids.slice(i * requestPageSize, (i + 1) * requestPageSize).map((id) => {
+            this.emit('fetch', collection, id);
+            return this.db.collection(collection).doc(id);
+          }),
+        ) as Promise<FirebaseFirestore.DocumentSnapshot<T>[]>;
+        promises.push(p);
+      }
+
+      const resolutions = await Promise.allSettled(promises);
+
+      for (let i = 0; i < resolutions.length; i++) {
+        const res = resolutions[i];
+        if (res.status === 'rejected') {
+          this.log.error(`[FireCache] Error fetching results page ${i} ${idSet.size} "${collection}" records from remote on attempt ${missCount + 1}.`, res.reason);
+        }
+        else {
+          const docs = res.value;
+          for (const data of docs) {
+            documents.push(data);
+            idSet.delete(data.id);
+          }
+        }
+      }
+
+      requestPageSize = Math.round(requestPageSize / 3); // With this magic math, we get up to 6 tries to get this right!
+      missCount += 1;
+    }
+    this.log.info(`[FireCache] Finished fetching ${documents.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+
+    return documents as FirebaseFirestore.DocumentSnapshot<T>[];
+  }
+
+  private getRequestsMemo: Map<string, Promise<any>> = new Map();
+
   /**
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
@@ -371,65 +440,52 @@ export default class FireStash extends EventEmitter {
   async get<T=object>(collection: string, id: string): Promise<T | null>;
   async get<T=object>(collection: string, id?: string): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
-    const stash = id ? { collection, cache: { [id]: 1 } } : await this.stash(collection);
-    const out: Record<string, T | null> = {};
-    const modified: string[] = [];
-    for (const key of Object.keys(stash.cache)) {
-      const record = await this.safeGet<T>(collection, key);
-      if (record) { out[key] = record; }
-
-      else {
-        modified.push(key);
-      }
+    const memoKey = `${collection}/${id || ''}`;
+    const stash = await this.stash(collection);
+    const cache = id ? { [id]: stash.cache[id] } : stash.cache;
+    if (this.getRequestsMemo.has(memoKey)) {
+      return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
     }
+    this.getRequestsMemo.set(memoKey, (async() => {
+      const out: Record<string, T | null> = {};
+      const modified: Set<string> = new Set();
+      for (const key of Object.keys(cache)) {
+        const record = await this.safeGet<T & InternalStash>(collection, key);
+        if (record && !record.__dirty__) { out[key] = record; }
+        else { modified.add(key); }
+      }
 
-    // Fetch all our updated documents.
-    const documents: FirebaseFirestore.DocumentSnapshot<T>[] = [];
-    const FieldPath = this.firebase.firestore.FieldPath;
-    if (modified.length) {
-      const start = Date.now();
-      this.log.info(`[FireCache] Fetching ${modified.length} from remote.`);
-      let working: string[] = [];
-      const promises: Promise<FirebaseFirestore.QuerySnapshot<T>>[] = [];
-      for (let i = 0; i < modified.length; i++) {
-        working.push(modified[i]);
-        if (working.length === BATCH_SIZE || i === (modified.length - 1)) {
-          // Ugh. Support getAll firebase. The hell.
-          // promises.push(this.db.collection(collection).where(FieldPath.documentId(), 'in', tmp).get() as Promise<FirebaseFirestore.QuerySnapshot<T>>);
-          documents.push(...(await this.db.collection(collection).where(FieldPath.documentId(), 'in', [...working]).get() as FirebaseFirestore.QuerySnapshot<T>).docs);
-          working = [];
+      if (modified.size) {
+        const documents = await this.safeGetAll(collection, modified);
+
+        // Insert all stashes and docs into the local store.
+        const batch = this.level.batch();
+        for (const doc of documents) {
+          const obj = out[doc.id] = (doc.data() as (T & InternalStash)) || null;
+          delete obj?.__dirty__;
+          batch.put(`${collection}/${doc.id}`, obj);
         }
+        await batch.write();
       }
-      const batches = await Promise.allSettled(promises);
-      for (const batch of batches) {
-        if (batch.status === 'rejected') {
-          this.log.error(`[FireStash] Error fetching ${BATCH_SIZE} records from remote.`, batch.reason);
-          continue;
-        }
-        documents.push(...batch.value.docs);
-      }
-      this.log.info(`[FireCache] Finished fetching ${documents.length} from remote in ${((Date.now() - start) / 1000)}s.`);
-    }
 
-    // Insert all stashes and docs into the local store.
-    const batch = this.level.batch();
-    for (const doc of documents) {
-      out[doc.id] = (doc.data() as T) || null;
-      batch.put(`${collection}/${doc.id}`, out[doc.id]);
-    }
-    await batch.write();
-
-    return id ? (out[id] || null) : out;
+      this.getRequestsMemo.delete(memoKey);
+      return id ? (out[id] || null) : out;
+    })());
+    return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }
 
   /**
    * Increment a single document's generation cache key. Syncs to remote once per second.
    * @param collection Collection Path
    */
-  async update(collection: string, key: string) {
-    const keys = this.toUpdate.get(collection) || new Set();
+  async update(collection: string, key: string, obj: object | null = null) {
+    const keys = this.toUpdate.get(collection) || new Map();
     this.toUpdate.set(collection, keys);
-    keys.add(key);
+    // If this collection+key combo has been called multiple times, don't try and set the local cache. Abort and pull form remote on next request.
+    // TODO: Emulate FireStore's merge behavior here so we don't have to make the extra round drip?
+    const updates = keys.get(key) || [];
+    updates.push(obj);
+    keys.set(key, updates);
     if (this.timeout) { return this.timeoutPromise; }
     return this.timeoutPromise = new Promise((resolve, reject) => {
       this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
