@@ -176,8 +176,7 @@ export default class FireStash extends EventEmitter {
     try {
       for (const [ collection, keys ] of this.toUpdate.entries()) {
         // Get / ensure we have the remote cache object present.
-        const localStash = collectionStashes.get(collection);
-        if (!localStash) { continue; }
+        const localStash = collectionStashes.get(collection) || {};
 
         // Get the stash's page and document count.
         let pageCount = Object.keys(localStash).length;
@@ -257,7 +256,7 @@ export default class FireStash extends EventEmitter {
               batch = this.db.batch();
             }
           }
-          localObj && localBatch.put(`${collection}/${key}`, localObj);
+          localObj ? localBatch.put(`${collection}/${key}`, localObj) : localBatch.del(`${collection}/${key}`);
 
           // Optimistically remove this key
           // TODO: Only remove after confirmed batch?
@@ -265,7 +264,7 @@ export default class FireStash extends EventEmitter {
         }
 
         // Queue a commit of our collection's local state.
-        localBatch.put(collection, localStash);
+        localStash ? localBatch.put(collection, localStash) : localBatch.del(collection);
         this.stashPagesMemo[collection] = localStash;
       }
 
@@ -294,43 +293,68 @@ export default class FireStash extends EventEmitter {
    * @param collection Collection Path
    * @param data IFireStash map of updates
    */
-  private async mergeRemote(collection: string, update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) {
+  private modified: Set<string> = new Set();
+  private eventsTimer: NodeJS.Timeout | null = null;
+  private async mergeRemote(collection: string, update: FirebaseFirestore.DocumentSnapshot[]) {
     // Fetch the local stash object for this collection that has just updated.
     const local: Record<string, IFireStash | undefined> = await this.stashPages(collection) || {};
 
     // Track modified document references to modified docs in this collection.
-    const modified: string[] = [];
+    const modified: [string, (object & InternalStash) | null][] = [];
 
     // Here we build our new local cache for the collection.
     const data: Record<string, IFireStash> = {};
 
-    for (const doc of update.docs) {
+    for (const doc of update) {
       const page = doc.id;
       const stash = doc.data() as IFireStash;
       data[page] = stash;
       const localPage = local[page] = local[page] || { collection, cache: {} };
       for (const [ id, value ] of Object.entries(stash.cache)) {
+        const localObj = await this.safeGet<object & InternalStash>(collection, id);
+        const key = `${collection}/${id}`;
+
         // If we have both the same cache generation id, and the actual object present, continue.
-        if (localPage.cache[id] === value && !(await this.safeGet<object & InternalStash>(collection, id))?.__dirty__) { continue; }
+        if (localPage.cache[id] === value && !localObj?.__dirty__) { continue; }
+        modified.push([ key, localObj ]);
         localPage.cache[id] = value;
-        modified.push(`${collection}/${id}`);
       }
     }
 
     // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
     const batch = this.level.batch();
-    batch.put(collection, local);
+    local ? batch.put(collection, local) : batch.del(collection);
     this.stashPagesMemo[collection] = local;
-    for (const doc of modified) { batch.del(doc); }
+    for (const [ key, obj ] of modified) {
+      const update = obj || {};
+      update.__dirty__ = true;
+      update ? batch.put(key, update) : batch.del(key);
+    }
     await batch.write();
 
     // Destroy our memoized get() request if it exists for everything that has changed to ensure we fetch latest on next call.
-    for (const doc of modified) { this.getRequestsMemo.delete(doc); }
-    if (modified.length) { this.getRequestsMemo.delete(collection); }
+    // Queue our events for a trigger.
+    for (const [doc] of modified) {
+      this.getRequestsMemo.delete(doc);
+      this.modified.add(doc);
+    }
+    if (modified.length) {
+      this.getRequestsMemo.delete(collection);
+      this.modified.add(collection);
+    }
 
-    // Trigger our events!
-    for (const doc of modified) { this.emit(doc); }
-    if (modified.length) { this.emit(collection); }
+    // Ensure we're scheduled for an event trigger.
+    this.eventsTimer = this.eventsTimer || setTimeout(this.triggerChangeEvents.bind(this), 180);
+  }
+
+  /**
+   * Triggered every 180ms when there are events in the queue to notify listeners in batches.
+   * Companion function to `mergeRemote`.
+   */
+  private triggerChangeEvents() {
+    for (const evt of this.modified) { this.emit(evt); }
+    this.modified.clear();
+    this.eventsTimer = null;
   }
 
   /**
@@ -346,7 +370,7 @@ export default class FireStash extends EventEmitter {
     return new Promise((resolve, reject) => {
       let firstCall: boolean | void = true;
       const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot((update) => {
-        this.mergeRemote(collection, update);
+        this.mergeRemote(collection, update.docs);
         firstCall && (firstCall = resolve());
       }, reject);
       this.watchers.set(collection, unsubscribe);
@@ -429,6 +453,7 @@ export default class FireStash extends EventEmitter {
     return documents as FirebaseFirestore.DocumentSnapshot<T>[];
   }
 
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
   private getRequestsMemo: Map<string, Promise<any>> = new Map();
 
   /**
@@ -455,6 +480,7 @@ export default class FireStash extends EventEmitter {
         else { modified.add(key); }
       }
 
+      /* eslint-disable-next-line */
       if (modified.size) {
         const documents = await this.safeGetAll(collection, modified);
 
@@ -463,7 +489,7 @@ export default class FireStash extends EventEmitter {
         for (const doc of documents) {
           const obj = out[doc.id] = (doc.data() as (T & InternalStash)) || null;
           delete obj?.__dirty__;
-          batch.put(`${collection}/${doc.id}`, obj);
+          obj ? batch.put(`${collection}/${doc.id}`, obj) : batch.del(`${collection}/${doc.id}`);
         }
         await batch.write();
       }
@@ -496,14 +522,19 @@ export default class FireStash extends EventEmitter {
    * Bust all existing cache keys by incrementing by one.
    * @param collection Collection Path
    */
-  async bust(collection: string) {
+  async bust(collection: string, key?: string) {
     // Ensure we are watching for remote updates.
     await this.watch(collection);
-    const stash = await this.stashPages(collection);
-    for (const page of Object.values(stash)) {
-      if (!page) { continue; }
-      for (const id of Object.keys(page.cache)) {
-        this.update(collection, id);
+    if (key) {
+      this.update(collection, key);
+    }
+    else {
+      const stash = await this.stashPages(collection);
+      for (const page of Object.values(stash)) {
+        if (!page) { continue; }
+        for (const id of Object.keys(page.cache)) {
+          this.update(collection, id);
+        }
       }
     }
     await this.allSettled();
@@ -513,13 +544,19 @@ export default class FireStash extends EventEmitter {
    * Ensure all documents in the collection are present in the cache. Will not update existing cache keys.
    * @param collection Collection Path
    */
-  async ensure(collection: string) {
+  async ensure(collection: string, key?: string) {
     // Ensure we are watching for remote updates.
     await this.watch(collection);
+    if (key) {
+      const obj = (await this.db.collection(collection).doc(key).get()).data() || {};
+      await this.update(collection, key, obj);
+      await this.allSettled();
+      return;
+    }
     const stash = (await this.stash(collection)) || { collection, cache: {} };
     const docs = (await this.db.collection(collection).get()).docs;
     for (const doc of docs) {
-      if (stash.cache[doc.id]) { continue; }
+      if ((key && key !== doc.id) || stash.cache[doc.id]) { continue; }
       this.update(collection, doc.id);
     }
     await this.allSettled();
