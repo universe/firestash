@@ -74,6 +74,52 @@ describe('Connector', function() {
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
     });
 
+    it.only('deep merges objects', async function() {
+      fireStash.db.doc('contacts/1').set({ obj: { foo: 'bar', obj: { foo: 'bar' } } });
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' } }, 'Shallow property retains deep object locally.');
+      assert.deepStrictEqual(
+        (await fireStash.db.doc('contacts/1').get()).data(),
+        { foo: 'bar', obj: { foo: 'bar', obj: { foo: 'bar' } } },
+        'Shallow property retains deep object remotely.',
+      );
+
+      fireStash.update('contacts', '1', { obj: { biz: 'baz', obj: { biz: 'baz' } } });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(
+        await fireStash.get('contacts'),
+        { 1: { foo: 'bar', obj: { biz: 'baz', obj: { biz: 'baz' } } } },
+        'Shallow property retains deep object locally.',
+      );
+      assert.deepStrictEqual(
+        (await fireStash.db.doc('contacts/1').get()).data(),
+        { foo: 'bar', obj: { foo: 'bar', biz: 'baz', obj: { foo: 'bar', biz: 'baz' } } },
+        'Shallow property retains deep object remotely.',
+      );
+
+      fireStash.update('contacts', '1', { obj: { biz: {}, obj: {} } });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(
+        await fireStash.get('contacts'),
+        { 1: { foo: 'bar', obj: { biz: 'baz', obj: { biz: 'baz' } } } },
+        'Deep empty object doesn\'t delete the whole thing locally.',
+      );
+      assert.deepStrictEqual(
+        (await fireStash.db.doc('contacts/1').get()).data(),
+        { foo: 'bar', obj: { foo: 'bar', biz: 'baz', obj: { foo: 'bar', biz: 'baz' } } },
+        'Deep empty object doesn\'t delete the whole thing remotely.',
+      );
+    });
+
+    it('gracefully handles undefined', async function() {
+      fireStash.db.doc('contacts/1').set({ foo: 'bar', biz: 'baz' });
+      fireStash.update('contacts', '1', { foo: undefined });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: {} }, 'Shallow property retains deep object locally.');
+      assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), { biz: 'baz' }, 'Shallow property retains deep object remotely.');
+    });
+
     it('handles multiple updates the same key and object', async function() {
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => {

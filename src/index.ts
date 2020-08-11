@@ -37,6 +37,39 @@ function encode(key: string) {
 
 function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
 
+// Gross. TODO: Optimize, handle loops
+function sanitizeLocal<T extends object>(FieldValue: typeof Firebase.firestore.FieldValue, obj: T, depth = 0): T {
+  if (depth > 100 || Array.isArray(obj) || obj instanceof FieldValue || obj === null) { return obj; } // Simple infinite loop protection.
+  for (const key of Object.keys(obj)) {
+    if (obj[key] === null) { continue; }
+    else if (obj[key] === undefined || Object.keys(obj[key]).length === 0) {
+      delete obj[key];
+    }
+    else if (typeof obj[key] === 'object') {
+      sanitizeLocal(FieldValue, obj[key], depth++);
+    }
+  }
+  return obj;
+}
+
+// Gross. TODO: Optimize, handle loops
+// https://github.com/firebase/firebase-admin-node/issues/987
+function sanitizeRemote<T extends object>(FieldValue: typeof Firebase.firestore.FieldValue, obj: T, depth = 0): T {
+  if (depth > 100 || Array.isArray(obj) || obj instanceof FieldValue) { return obj; } // Simple infinite loop protection.
+  for (const key of Object.keys(obj)) {
+    if (obj[key] === undefined) {
+      obj[key] = FieldValue.delete();
+    }
+    else if (Object.keys(obj[key]).length === 0) {
+      delete obj[key];
+    }
+    else if (typeof obj[key] === 'object') {
+      sanitizeRemote(FieldValue, obj[key], depth++);
+    }
+  }
+  return obj;
+}
+
 const PAGINATION = 25000;
 const BATCH_SIZE = 10;
 function pageSize(): number {
@@ -236,8 +269,8 @@ export default class FireStash extends EventEmitter {
           let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
           for (const obj of objects.length ? objects : [null]) {
             if (obj) {
-              batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
-              localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+              batch.set(this.db.doc(`${collection}/${key}`), obj ? sanitizeRemote(FieldValue, obj) : obj, { merge: true });
+              localObj && (localObj = sanitizeLocal(FieldValue, deepMerge(localObj, obj, { arrayMerge: overwriteMerge })));
               count += 1; // +1 for object merge
             }
             else {
