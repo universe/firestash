@@ -6,7 +6,7 @@ import * as path from 'path';
 import { clearTimeout } from 'timers';
 import levelup, { LevelUp } from 'levelup';
 import encoding from 'encoding-down';
-import rocksdb from 'rocksdb';
+import leveldown from 'leveldown';
 import memdown from 'memdown';
 import * as deepMerge from 'deepmerge';
 
@@ -83,7 +83,7 @@ export default class FireStash extends EventEmitter {
     this.log = console;
     if (this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
-      this.level = levelup(encoding(rocksdb(path.join(this.dir, '.firestash')), { keyEncoding: 'utf8', valueEncoding: 'json' }));
+      this.level = levelup(encoding(leveldown(path.join(this.dir, '.firestash')), { keyEncoding: 'utf8', valueEncoding: 'json' }));
     }
     else {
       this.level = levelup(encoding(memdown(), { keyEncoding: 'utf8', valueEncoding: 'json' }));
