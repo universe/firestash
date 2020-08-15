@@ -315,7 +315,7 @@ export default class FireStash extends EventEmitter {
         const key = `${collection}/${id}`;
 
         // If we have both the same cache generation id, and the actual object present, continue.
-        if (localPage.cache[id] === value && !localObj?.__dirty__) { continue; }
+        if (localPage.cache[id] === value && (localObj && !localObj.__dirty__)) { continue; }
         modified.push([ key, localObj ]);
         localPage.cache[id] = value;
       }
@@ -323,12 +323,12 @@ export default class FireStash extends EventEmitter {
 
     // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
     const batch = this.level.batch();
-    local ? batch.put(collection, local) : batch.del(collection);
+    batch.put(collection, local);
     this.stashPagesMemo[collection] = local;
     for (const [ key, obj ] of modified) {
       const update = obj || {};
       update.__dirty__ = true;
-      update ? batch.put(key, update) : batch.del(key);
+      batch.put(key, update);
     }
     await batch.write();
 
@@ -369,8 +369,8 @@ export default class FireStash extends EventEmitter {
     // Return new promise that resolves after initial snapshot is done.
     return new Promise((resolve, reject) => {
       let firstCall: boolean | void = true;
-      const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot((update) => {
-        this.mergeRemote(collection, update.docs);
+      const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot(async(update) => {
+        await this.mergeRemote(collection, update.docs);
         firstCall && (firstCall = resolve());
       }, reject);
       this.watchers.set(collection, unsubscribe);
@@ -465,7 +465,7 @@ export default class FireStash extends EventEmitter {
   async get<T=object>(collection: string, id: string): Promise<T | null>;
   async get<T=object>(collection: string, id?: string): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
-    const memoKey = `${collection}/${id || ''}`;
+    const memoKey = `${collection}${id ? `/${id}` : ''}`;
     const stash = await this.stash(collection);
     const cache = id ? { [id]: stash.cache[id] } : stash.cache;
     if (this.getRequestsMemo.has(memoKey)) {
