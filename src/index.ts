@@ -126,7 +126,6 @@ export default class FireStash extends EventEmitter {
    * Called once per second when there are updated queued. Writes all changes to remote stash cache.
    */
   private async saveCacheUpdate() {
-
     // Wait for our local events queue to finish before syncing remote.
     await this.drainEventsPromise;
 
@@ -308,7 +307,7 @@ export default class FireStash extends EventEmitter {
     const local: Record<string, IFireStash | undefined> = await this.stashPages(collection) || {};
 
     // Track modified document references to modified docs in this collection.
-    const modified: [string, (object & InternalStash) | null][] = [];
+    const modified: [string, string][] = [];
 
     // Here we build our new local cache for the collection.
     const data: Record<string, IFireStash> = {};
@@ -319,12 +318,9 @@ export default class FireStash extends EventEmitter {
       data[page] = stash;
       const localPage = local[page] = local[page] || { collection, cache: {} };
       for (const [ id, value ] of Object.entries(stash.cache)) {
-        const localObj = await this.safeGet<object & InternalStash>(collection, id);
-        const key = `${collection}/${id}`;
-
-        // If we have both the same cache generation id, and the actual object present, continue.
-        if (localPage.cache[id] === value && (localObj && !localObj.__dirty__)) { continue; }
-        modified.push([ key, localObj ]);
+        // If we have the same cache generation id, we already have the latest (likely from a local update). Skip.
+        if (localPage.cache[id] === value) { continue; }
+        modified.push([ collection, id ]);
         localPage.cache[id] = value;
       }
     }
@@ -333,10 +329,10 @@ export default class FireStash extends EventEmitter {
     const batch = this.level.batch();
     batch.put(collection, local);
     this.stashPagesMemo[collection] = local;
-    for (const [ key, obj ] of modified) {
-      const update = obj || {};
-      update.__dirty__ = true;
-      batch.put(key, update);
+    for (const [ collection, id ] of modified) {
+      const obj = await this.safeGet<object & InternalStash>(collection, id) || {} as object & InternalStash;
+      obj.__dirty__ = true;
+      batch.put(`${collection}/${id}`, obj);
     }
     await batch.write();
 
