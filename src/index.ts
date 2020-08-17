@@ -173,6 +173,7 @@ export default class FireStash extends EventEmitter {
     // We need this to ensure all we know what page to increment the generation number on.
     await Promise.allSettled(collectionStashPromises);
 
+    const events: Set<string> = new Set();
     try {
       for (const [ collection, keys ] of this.toUpdate.entries()) {
         // Get / ensure we have the remote cache object present.
@@ -239,6 +240,8 @@ export default class FireStash extends EventEmitter {
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
               localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
               count += 1; // +1 for object merge
+              events.add(`${collection}/${key}`);
+              events.add(collection);
             }
             else {
               localObj.__dirty__ = true;
@@ -281,6 +284,10 @@ export default class FireStash extends EventEmitter {
       // Once all of our batch writes are done, re-balance our caches if needed and resolve.
       await Promise.allSettled(promises);
 
+      // Emit events for locally saved objects that we don't have to wait for a round trip on to access!
+      for (const evt of events) { this.emit(evt); }
+
+      // Let everyone know we're done.
       this.emit('settled');
     }
     catch (err) {

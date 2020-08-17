@@ -99,9 +99,14 @@ describe('Connector', function() {
 
     it('one update with no content will force sync with remote', async function() {
       const fetches: string[] = [];
+      let objUpdates = 0;
+      let collectionUpdates = 0;
       fireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
       });
+      fireStash.on('contacts/1', () => objUpdates++);
+      fireStash.on('contacts', () => collectionUpdates++);
+
       fireStash.update('contacts', '1', { foo: 'bar', deep: { zip: 'zap' }, arr: [ 1, 2 ] });
       fireStash.update('contacts', '1', { biz: 'baz', deep: { zoop: 'zop' }, arr: [ 3, 4 ] });
       fireStash.update('contacts', '1');
@@ -119,6 +124,8 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
       assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
       assert.deepStrictEqual(fetches, ['contacts/1'], 'Fetches only what is necessary');
+      assert.strictEqual(objUpdates, 1, 'Object events');
+      assert.strictEqual(collectionUpdates, 1, 'Collection events');
     });
 
     it('is able to update deep collection keys with an object to cache', async function() {
