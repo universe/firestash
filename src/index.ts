@@ -176,7 +176,7 @@ export default class FireStash extends EventEmitter {
     // We need this to ensure all we know what page to increment the generation number on.
     await Promise.allSettled(collectionStashPromises);
 
-    const events: Set<string> = new Set();
+    const events: Map<string, Set<string>> = new Map();
     try {
       for (const [ collection, keys ] of this.toUpdate.entries()) {
         // Get / ensure we have the remote cache object present.
@@ -246,6 +246,9 @@ export default class FireStash extends EventEmitter {
               const localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
               localObj.__dirty__ = true;
               localBatch.put(`${collection}/${key}`, localObj);
+              const keys = events.get(collection) || new Set();
+              keys.add(key);
+              events.set(collection, keys);
             }
 
             // If we've hit the 500 write limit, batch write these objects.
@@ -285,7 +288,12 @@ export default class FireStash extends EventEmitter {
       await Promise.allSettled(promises);
 
       // Emit events for locally saved objects that we don't have to wait for a round trip on to access!
-      for (const evt of events) { this.emit(evt); }
+      for (const [ collection, keys ] of events) {
+        for (const key of keys) {
+          this.emit(`${collection}/${key}`, collection, [key]);
+        }
+        this.emit(collection, collection, [...keys]);
+      }
 
       // Let everyone know we're done.
       this.emit('settled');
@@ -300,7 +308,7 @@ export default class FireStash extends EventEmitter {
    * @param collection Collection Path
    * @param data IFireStash map of updates
    */
-  private modified: Set<string> = new Set();
+  private modified: Map<string, Set<string>> = new Map();
   private eventsTimer: NodeJS.Timeout | null = null;
   private async mergeRemote(collection: string, update: FirebaseFirestore.DocumentSnapshot[]) {
     // Fetch the local stash object for this collection that has just updated.
@@ -320,8 +328,11 @@ export default class FireStash extends EventEmitter {
       for (const [ id, value ] of Object.entries(stash.cache)) {
         // If we have the same cache generation id, we already have the latest (likely from a local update). Skip.
         if (localPage.cache[id] === value) { continue; }
-        modified.push([ collection, id ]);
         localPage.cache[id] = value;
+        modified.push([ collection, id ]);
+        const keys = this.modified.get(collection) || new Set();
+        this.modified.set(collection, keys);
+        keys.add(id);
       }
     }
 
@@ -340,11 +351,9 @@ export default class FireStash extends EventEmitter {
     // Queue our events for a trigger.
     for (const [doc] of modified) {
       this.getRequestsMemo.delete(doc);
-      this.modified.add(doc);
     }
     if (modified.length) {
       this.getRequestsMemo.delete(collection);
-      this.modified.add(collection);
     }
 
     // Ensure we're scheduled for an event trigger.
@@ -356,7 +365,14 @@ export default class FireStash extends EventEmitter {
    * Companion function to `mergeRemote`.
    */
   private triggerChangeEvents() {
-    for (const evt of this.modified) { this.emit(evt); }
+    // Emit events for locally saved objects that we don't have to wait for a round trip on to access!
+    console.log(this.modified);
+    for (const [ collection, keys ] of this.modified) {
+      for (const key of keys) {
+        this.emit(`${collection}/${key}`, collection, [key]);
+      }
+      this.emit(collection, collection, [...keys]);
+    }
     this.modified.clear();
     this.eventsTimer = null;
   }
@@ -487,7 +503,6 @@ export default class FireStash extends EventEmitter {
       /* eslint-disable-next-line */
       if (modified.size) {
         const documents = await this.safeGetAll(collection, modified);
-
         // Insert all stashes and docs into the local store.
         const batch = this.level.batch();
         for (const doc of documents) {
@@ -504,23 +519,26 @@ export default class FireStash extends EventEmitter {
     return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }
 
-  private localEvents: Map<string, Set<object> | null> = new Map();
+  private localEvents: Map<string, Map<string, Set<object> | null>> = new Map();
   private drainEventsTimer: NodeJS.Immediate | null = null;
   public drainEventsPromise: Promise<void> = Promise.resolve();
   private async drainEvents() {
-    for (const [ evt, updates ] of this.localEvents) {
-      const parts = evt.split('/');
-      const collection = parts.slice(0, -1).join('/');
-      const key = parts.pop();
-      if (collection && key && updates?.size) {
-        let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
-        for (const obj of updates) {
-          localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+    for (const [ collection, records ] of this.localEvents) {
+      const keyIds: string[] = [];
+      for (const [ key, updates ] of records) {
+        const id = `${collection}/${key}`;
+        if (collection && key && updates?.size) {
+          let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
+          for (const obj of updates) {
+            localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+          }
+          delete localObj.__dirty__;
+          await this.level.put(id, localObj);
         }
-        delete localObj.__dirty__;
-        await this.level.put(evt, localObj);
+        this.emit(id, collection, [key]);
+        keyIds.push(key);
       }
-      this.emit(evt);
+      this.emit(collection, collection, keyIds);
     }
     this.localEvents.clear();
     this.drainEventsTimer = null;
@@ -540,11 +558,11 @@ export default class FireStash extends EventEmitter {
     keys.set(key, updates);
 
     if (obj) {
-      const id = `${collection}/${key}`;
-      const objSet = this.localEvents.get(id) || new Set();
+      const collectionMap = this.localEvents.get(collection) || new Map();
+      this.localEvents.set(collection, collectionMap);
+      const objSet = collectionMap.get(key) || new Set();
+      collectionMap.set(key, objSet);
       objSet.add(obj);
-      this.localEvents.set(`${collection}/${key}`, objSet);
-      this.localEvents.set(collection, null);
     }
 
     if (!this.drainEventsTimer) {

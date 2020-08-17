@@ -107,13 +107,13 @@ describe('Connector', function() {
     it('one update with no content will force sync with remote', async function() {
       const fetches: string[] = [];
       let objUpdates = 0;
-      let collectionUpdates = 0;
+      let collectionUpdates: string[] | null = null;
       fireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
       });
 
       fireStash.on('contacts/1', () => objUpdates++);
-      fireStash.on('contacts', () => collectionUpdates++);
+      fireStash.on('contacts', (_, update) => collectionUpdates = update);
 
       fireStash.update('contacts', '1', { foo: 'bar', deep: { zip: 'zap' }, arr: [ 1, 2 ] });
       fireStash.update('contacts', '1', { biz: 'baz', deep: { zoop: 'zop' }, arr: [ 3, 4 ] });
@@ -124,7 +124,7 @@ describe('Connector', function() {
       setTimeout(async() => {
         ran = 1;
         assert.strictEqual(objUpdates, 1, 'Object events triggered, de-duped , and occur immediately');
-        assert.strictEqual(collectionUpdates, 1, 'Collection events triggered, de-duped , and occur immediately');
+        assert.deepStrictEqual(collectionUpdates, ['1'], 'Collection events triggered, de-duped , and occur immediately');
       }, 10);
 
       const expected = {
