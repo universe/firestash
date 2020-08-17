@@ -74,7 +74,7 @@ describe('Connector', function() {
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
     });
 
-    it('handles multiple updates the same key and object', async function() {
+    it('handles multiple updates to the same key and object', async function() {
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
@@ -90,11 +90,18 @@ describe('Connector', function() {
         },
         arr: [ 3, 4 ],
       };
+
+      await fireStash.drainEventsPromise;
+      setTimeout(async() => {
+        assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally immediately');
+        assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary after local fire.');
+      }, 10);
+
       await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally after sync');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
-      assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
       assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
-      assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary');
+      assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary after remote update.');
     });
 
     it('one update with no content will force sync with remote', async function() {
@@ -104,12 +111,22 @@ describe('Connector', function() {
       fireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
       });
+
       fireStash.on('contacts/1', () => objUpdates++);
       fireStash.on('contacts', () => collectionUpdates++);
 
       fireStash.update('contacts', '1', { foo: 'bar', deep: { zip: 'zap' }, arr: [ 1, 2 ] });
       fireStash.update('contacts', '1', { biz: 'baz', deep: { zoop: 'zop' }, arr: [ 3, 4 ] });
       fireStash.update('contacts', '1');
+
+      let ran = 0;
+      await fireStash.drainEventsPromise;
+      setTimeout(async() => {
+        ran = 1;
+        assert.strictEqual(objUpdates, 1, 'Object events triggered, de-duped , and occur immediately');
+        assert.strictEqual(collectionUpdates, 1, 'Collection events triggered, de-duped , and occur immediately');
+      }, 10);
+
       const expected = {
         foo: 'bar',
         biz: 'baz',
@@ -119,13 +136,14 @@ describe('Connector', function() {
         },
         arr: [ 3, 4 ],
       };
+
       await fireStash.allSettled();
+
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
       assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
       assert.deepStrictEqual(fetches, ['contacts/1'], 'Fetches only what is necessary');
-      assert.strictEqual(objUpdates, 1, 'Object events');
-      assert.strictEqual(collectionUpdates, 1, 'Collection events');
+      assert.strictEqual(1, ran, 'Ran events tests');
     });
 
     it('is able to update deep collection keys with an object to cache', async function() {

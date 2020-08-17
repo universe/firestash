@@ -126,6 +126,10 @@ export default class FireStash extends EventEmitter {
    * Called once per second when there are updated queued. Writes all changes to remote stash cache.
    */
   private async saveCacheUpdate() {
+
+    // Wait for our local events queue to finish before syncing remote.
+    await this.drainEventsPromise;
+
     this.timeout = null;
     const FieldValue = this.firebase.firestore.FieldValue;
     /* eslint-disable-next-line */
@@ -234,17 +238,15 @@ export default class FireStash extends EventEmitter {
           page.cache[key] = (page.cache[key] || 0) + 1;
 
           // For each object we've been asked to update (run at least once even if no object was presented)...
-          let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
           for (const obj of objects.length ? objects : [null]) {
             if (obj) {
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
-              localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
               count += 1; // +1 for object merge
-              events.add(`${collection}/${key}`);
-              events.add(collection);
             }
             else {
+              const localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
               localObj.__dirty__ = true;
+              localBatch.put(`${collection}/${key}`, localObj);
             }
 
             // If we've hit the 500 write limit, batch write these objects.
@@ -259,7 +261,6 @@ export default class FireStash extends EventEmitter {
               batch = this.db.batch();
             }
           }
-          localObj ? localBatch.put(`${collection}/${key}`, localObj) : localBatch.del(`${collection}/${key}`);
 
           // Optimistically remove this key
           // TODO: Only remove after confirmed batch?
@@ -507,6 +508,28 @@ export default class FireStash extends EventEmitter {
     return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }
 
+  private localEvents: Map<string, Set<object> | null> = new Map();
+  private drainEventsTimer: NodeJS.Immediate | null = null;
+  public drainEventsPromise: Promise<void> = Promise.resolve();
+  private async drainEvents() {
+    for (const [ evt, updates ] of this.localEvents) {
+      const parts = evt.split('/');
+      const collection = parts.slice(0, -1).join('/');
+      const key = parts.pop();
+      if (collection && key && updates?.size) {
+        let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
+        for (const obj of updates) {
+          localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+        }
+        delete localObj.__dirty__;
+        await this.level.put(evt, localObj);
+      }
+      this.emit(evt);
+    }
+    this.localEvents.clear();
+    this.drainEventsTimer = null;
+  }
+
   /**
    * Increment a single document's generation cache key. Syncs to remote once per second.
    * @param collection Collection Path
@@ -519,6 +542,19 @@ export default class FireStash extends EventEmitter {
     const updates = keys.get(key) || [];
     updates.push(obj);
     keys.set(key, updates);
+
+    if (obj) {
+      const id = `${collection}/${key}`;
+      const objSet = this.localEvents.get(id) || new Set();
+      objSet.add(obj);
+      this.localEvents.set(`${collection}/${key}`, objSet);
+      this.localEvents.set(collection, null);
+    }
+
+    if (!this.drainEventsTimer) {
+      this.drainEventsTimer = setImmediate(() => this.drainEventsPromise = this.drainEvents());
+    }
+
     if (this.timeout) { return this.timeoutPromise; }
     return this.timeoutPromise = new Promise((resolve, reject) => {
       this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
