@@ -209,6 +209,8 @@ describe('Connector', function() {
       let batch = fireStash.db.batch();
       for (let i = 0; i < 25000; i++) {
         fireStash.update('collection2', `id${i}`);
+        fireStash.update(`collection2/id${i}/sub-page`, String(i));
+        fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
         batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
         cache[`id${i}`] = 1;
         objects[`collection2/id${i}`] = { id: i };
@@ -223,7 +225,9 @@ describe('Connector', function() {
       assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 25000, 'Writes an obscene amount of data.');
       const res = await fireStash.get('collection2');
       assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 25000, 'Fetches an obscene amount of data keys.');
+
       assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 25000, 'Fetches an obscene amount of data values.');
+
       const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
       assert.deepStrictEqual(dat.docs.length, 1, '20,000 keys and below stay in a single page.');
 
