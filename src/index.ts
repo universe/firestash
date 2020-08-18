@@ -37,7 +37,7 @@ function encode(key: string) {
 
 function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
 
-const PAGINATION = 25000;
+const PAGINATION = 15000;
 const BATCH_SIZE = 10;
 function pageSize(): number {
   return process.env.FIRESTASH_PAGINATION || PAGINATION;
