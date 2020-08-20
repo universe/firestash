@@ -5,7 +5,6 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import { clearTimeout } from 'timers';
 import levelup, { LevelUp } from 'levelup';
-import encoding from 'encoding-down';
 import leveldown from 'leveldown';
 import memdown from 'memdown';
 import * as deepMerge from 'deepmerge';
@@ -83,10 +82,10 @@ export default class FireStash extends EventEmitter {
     this.log = console;
     if (this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
-      this.level = levelup(encoding(leveldown(path.join(this.dir, '.firestash')), { keyEncoding: 'utf8', valueEncoding: 'json' }));
+      this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
     }
     else {
-      this.level = levelup(encoding(memdown(), { keyEncoding: 'utf8', valueEncoding: 'json' }));
+      this.level = levelup(memdown());
     }
   }
 
@@ -100,7 +99,7 @@ export default class FireStash extends EventEmitter {
   private async stashPages(collection: string): Promise<Record<string, IFireStash | undefined>> {
     if (this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
     try {
-      return this.stashPagesMemo[collection] = (await this.level.get(collection) || {} as Record<string, IFireStash>);
+      return this.stashPagesMemo[collection] = (JSON.parse(await this.level.get(collection, { asBuffer: false }) || '{}') as Record<string, IFireStash>);
     }
     catch (_err) {
       return this.stashPagesMemo[collection] = {};
@@ -112,6 +111,8 @@ export default class FireStash extends EventEmitter {
    * @param collection Collection Path
    */
   async stash(collection: string): Promise<IFireStash> {
+    if (this.stashMemo[collection]) { return this.stashMemo[collection]; }
+
     const pages = await this.stashPages(collection);
     const out: IFireStash = { collection, cache: {} };
     for (const dat of Object.values(pages)) {
@@ -250,7 +251,7 @@ export default class FireStash extends EventEmitter {
               const localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
               const id = `${collection}/${key}`;
               localObj.__dirty__ = true;
-              localBatch.put(id, localObj);
+              localBatch.put(id, JSON.stringify(localObj));
               this.documentMemo[id] = localObj;
               const keys = events.get(collection) || new Set();
               keys.add(key);
@@ -276,8 +277,11 @@ export default class FireStash extends EventEmitter {
         }
 
         // Queue a commit of our collection's local state.
-        localStash ? localBatch.put(collection, localStash) : localBatch.del(collection);
+        localStash ? localBatch.put(collection, JSON.stringify(localStash)) : localBatch.del(collection);
         this.stashPagesMemo[collection] = localStash;
+
+        // Re-calculate stashMemo on next stash() request.
+        delete this.stashMemo[collection];
       }
 
       // Batch write the changes.
@@ -344,12 +348,16 @@ export default class FireStash extends EventEmitter {
 
     // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
     const batch = this.level.batch();
-    batch.put(collection, local);
+    batch.put(collection, JSON.stringify(local));
     this.stashPagesMemo[collection] = local;
+
+    // Re-compute on next stash() request.
+    delete this.stashMemo[collection];
+
     for (const [ collection, id ] of modified) {
       const obj = await this.safeGet<object & InternalStash>(collection, id) || {} as object & InternalStash;
       obj.__dirty__ = true;
-      batch.put(`${collection}/${id}`, obj);
+      batch.put(`${collection}/${id}`, JSON.stringify(obj));
     }
     await batch.write();
 
@@ -427,7 +435,7 @@ export default class FireStash extends EventEmitter {
   private async safeGet<T=object>(collection: string, key: string): Promise<T | null> {
     const id = `${collection}/${key}`;
     if (this.documentMemo[id]) { return this.documentMemo[id] as unknown as T; }
-    try { return (this.documentMemo[id] = (await this.level.get(id) || {})) as T; }
+    try { return (this.documentMemo[id] = JSON.parse((await this.level.get(id, { asBuffer: false }) || '{}'))) as T; }
     catch (_err) { return null; }
   }
 
@@ -496,7 +504,7 @@ export default class FireStash extends EventEmitter {
       return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
     }
     this.getRequestsMemo.set(memoKey, (async() => {
-      const out: Record<string, T | null> = {};
+      let out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
       if (id) {
         for (const key of Object.keys(cache)) {
@@ -506,11 +514,12 @@ export default class FireStash extends EventEmitter {
         }
       }
       else {
+        let data = '';
         await new Promise((resolve) => {
-          const stream = this.level.createReadStream({ gt: collection });
+          const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
           stream.on('data', (dat) => {
-            const record = dat.value as T & InternalStash;
-            const id = dat.key as string;
+            const record = dat.value || '{}';
+            const id = dat.key.toString('utf8') as string;
             if (!id.startsWith(collection)) {
               /* eslint-disable-next-line */
               // @ts-ignore
@@ -520,12 +529,19 @@ export default class FireStash extends EventEmitter {
             }
             const key = id.replace(collection + '/', '');
             if (key.includes('/') || id === collection) { return; }
-            if (record && !record.__dirty__) { out[key] = record; }
+            if (record && !record.includes('__dirty__')) { data += `${data ? ',' : ''}"${key}": ${record}`; }
             else { modified.add(key); }
           });
           stream.on('error', () => resolve());
           stream.on('close', () => resolve());
           stream.on('end', () => resolve());
+        }).then(() => {
+          try {
+            out = JSON.parse(`{ ${data} }`);
+          }
+          catch (err) {
+            this.log.error(`[FireStash] Error parsing batch get for '${collection}'.`);
+          }
         });
       }
 
@@ -539,7 +555,7 @@ export default class FireStash extends EventEmitter {
           const obj = out[doc.id] = (doc.data() as (T & InternalStash)) || null;
           delete obj?.__dirty__;
           if (obj) {
-            batch.put(id, obj);
+            batch.put(id, JSON.stringify(obj));
             this.documentMemo[id] = obj;
           }
           else {
@@ -570,7 +586,7 @@ export default class FireStash extends EventEmitter {
             localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
           }
           delete localObj.__dirty__;
-          await this.level.put(id, localObj);
+          await this.level.put(id, JSON.stringify(localObj));
           this.documentMemo[id] = localObj;
         }
         this.emit(id, collection, [key]);
@@ -632,6 +648,34 @@ export default class FireStash extends EventEmitter {
         }
       }
     }
+    await this.allSettled();
+  }
+
+  /**
+   * Destroys any record of the collection in the stash.
+   * @param collection Collection Path
+   */
+  async purge(collection: string) {
+    // Ensure we are watching for remote updates.
+    const pages = await this.db.collection('firestash').where('collection', '==', collection).get();
+    const localPages = await this.stashPages(collection);
+    delete this.stashPagesMemo[collection];
+    delete this.stashMemo[collection];
+
+    for (const page of pages.docs) {
+      await this.db.collection('firestash').doc(page.id).delete();
+    }
+
+    const batch = this.level.batch();
+    for (const page of Object.values(localPages)) {
+      if (!page || !page.cache) { continue; }
+      for (const id of Object.keys(page.cache)) {
+        batch.del(`${collection}/${id}`);
+      }
+    }
+
+    batch.del(collection);
+    await batch.write();
     await this.allSettled();
   }
 

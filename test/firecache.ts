@@ -39,6 +39,16 @@ describe('Connector', function() {
       assert.ok((Date.now() - start) < 2000, 'Resolves in ~1s');
     });
 
+    it('is able to purge collections', async function() {
+      fireStash.update('purge', 'id1');
+      fireStash.update('purge', 'id2');
+      fireStash.update('purge', 'id3');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('purge'), { collection: 'purge', cache: { id1: 1, id2: 1, id3: 1 } }, 'Creates collection');
+      await fireStash.purge('purge');
+      assert.deepStrictEqual(await fireStash.stash('purge'), { collection: 'purge', cache: {} }, 'Purges collection');
+    });
+
     it('creates in-memory local db if started with no root directory', async function() {
       const memStash = new FireStash(Firebase, app);
       memStash.update('contacts', 'id1');
