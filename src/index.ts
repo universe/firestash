@@ -403,7 +403,9 @@ export default class FireStash extends EventEmitter {
     return new Promise((resolve, reject) => {
       let firstCall: boolean | void = true;
       const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot(async(update) => {
-        await this.mergeRemote(collection, update.docs);
+        const docs: FirebaseFirestore.DocumentSnapshot[] = [];
+        update.docChanges().forEach((change) => docs.push(change.doc));
+        await this.mergeRemote(collection, docs);
         firstCall && (firstCall = resolve());
       }, reject);
       this.watchers.set(collection, unsubscribe);
@@ -495,31 +497,33 @@ export default class FireStash extends EventEmitter {
   /* eslint-disable no-dupe-class-members */
   async get<T=object>(collection: string): Promise<Record<string, T | null>>;
   async get<T=object>(collection: string, id: string): Promise<T | null>;
-  async get<T=object>(collection: string, id?: string): Promise<Record<string, T | null> | T | null> {
+  async get<T=object>(collection: string, id: string[]): Promise<Record<string, T | null>>;
+  async get<T=object>(collection: string, id?: string | string[]): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
     const memoKey = `${collection}${id ? `/${id}` : ''}`;
-    const stash = await this.stash(collection);
-    const cache = id ? { [id]: stash.cache[id] } : stash.cache;
+
     if (this.getRequestsMemo.has(memoKey)) {
       return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
     }
     this.getRequestsMemo.set(memoKey, (async() => {
       let out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
-      if (id) {
-        for (const key of Object.keys(cache)) {
-          const record = await this.safeGet<T & InternalStash>(collection, key);
-          if (record && !record.__dirty__) { out[key] = record; }
-          else { modified.add(key); }
-        }
+      if (typeof id === 'string') {
+        const record = await this.safeGet<T & InternalStash>(collection, id);
+        if (record && !record.__dirty__) { out[id] = record; }
+        else { modified.add(id); }
       }
       else {
         let data = '';
+        const ids = new Set((id ? Array.isArray(id) ? id : [id] : []).map(id => `${collection}/${id}`));
         await new Promise((resolve) => {
           const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
           stream.on('data', (dat) => {
             const record = dat.value || '{}';
+
             const id = dat.key.toString('utf8') as string;
+
+            // If the key doesn't start with the collection name, we're done!
             if (!id.startsWith(collection)) {
               /* eslint-disable-next-line */
               // @ts-ignore
@@ -527,8 +531,15 @@ export default class FireStash extends EventEmitter {
               resolve();
               return;
             }
+
+            // If is not in the provided ID set, skip.
+            if (ids.size && !ids.has(id)) { return; }
+
+            // If is the collection itself, or a sub-collection, skip.
             const key = id.replace(collection + '/', '');
             if (key.includes('/') || id === collection) { return; }
+
+            // If dirty, queue for fetch, otherwise add to our JSON return.
             if (record && !record.includes('__dirty__')) { data += `${data ? ',' : ''}"${key}": ${record}`; }
             else { modified.add(key); }
           });
@@ -567,7 +578,7 @@ export default class FireStash extends EventEmitter {
       }
 
       this.getRequestsMemo.delete(memoKey);
-      return id ? (out[id] || null) : out;
+      return typeof id === 'string' ? (out[id] || null) : out;
     })());
     return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }

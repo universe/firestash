@@ -192,6 +192,28 @@ describe('Connector', function() {
       );
     });
 
+    it('is able to get a list of ids', async function() {
+      fireStash.update('multi-get', 'id1', { foo: 1 });
+      fireStash.update('multi-get', 'id2', { foo: 2 });
+      fireStash.update('multi-get', 'id3', { foo: 3 });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(
+        await fireStash.get('multi-get', 'id1'),
+        { foo: 1 },
+        'Fetches single document.',
+      );
+      assert.deepStrictEqual(
+        await fireStash.get('multi-get', [ 'id1', 'id3' ]),
+        { id1: { foo: 1 }, id3: { foo: 3 } },
+        'Fetches multiple documents.',
+      );
+      assert.deepStrictEqual(
+        await fireStash.get('multi-get'),
+        { id1: { foo: 1 }, id2: { foo: 2 }, id3: { foo: 3 } },
+        'Fetches entire collection.',
+      );
+    });
+
     it('batches large key updates within one collection', async function() {
       let i = 0;
       fireStash.on('save', () => { i++; });
