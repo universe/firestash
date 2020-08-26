@@ -500,7 +500,8 @@ export default class FireStash extends EventEmitter {
   async get<T=object>(collection: string, id: string[]): Promise<Record<string, T | null>>;
   async get<T=object>(collection: string, id?: string | string[]): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
-    const memoKey = `${collection}${id ? `/${id}` : ''}`;
+    const ids = new Set((id ? Array.isArray(id) ? id : [id] : []));
+    const memoKey = `${collection}${id ? `/${[...ids].join(',')}` : ''}`;
 
     if (this.getRequestsMemo.has(memoKey)) {
       return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
@@ -508,14 +509,15 @@ export default class FireStash extends EventEmitter {
     this.getRequestsMemo.set(memoKey, (async() => {
       let out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
-      if (typeof id === 'string') {
-        const record = await this.safeGet<T & InternalStash>(collection, id);
-        if (record && !record.__dirty__) { out[id] = record; }
-        else { modified.add(id); }
+      if (ids.size > 0 && ids.size <= 30) {
+        for (const id of ids) {
+          const record = await this.safeGet<T & InternalStash>(collection, id);
+          if (record && !record.__dirty__) { out[id] = record; }
+          else { modified.add(id); }
+        }
       }
       else {
         let data = '';
-        const ids = new Set((id ? Array.isArray(id) ? id : [id] : []).map(id => `${collection}/${id}`));
         await new Promise((resolve) => {
           const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
           stream.on('data', (dat) => {
@@ -532,12 +534,11 @@ export default class FireStash extends EventEmitter {
               return;
             }
 
-            // If is not in the provided ID set, skip.
-            if (ids.size && !ids.has(id)) { return; }
-
-            // If is the collection itself, or a sub-collection, skip.
+            // Get the document key relative to this collection.
             const key = id.replace(collection + '/', '');
-            if (key.includes('/') || id === collection) { return; }
+
+            // If is not in the provided ID set, is the collection itself, or a sub-collection, skip.
+            if ((ids.size && !ids.has(key)) || id === collection || key.includes('/')) { return; }
 
             // If dirty, queue for fetch, otherwise add to our JSON return.
             if (record && !record.includes('__dirty__')) { data += `${data ? ',' : ''}"${key}": ${record}`; }
