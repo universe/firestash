@@ -84,6 +84,16 @@ describe('Connector', function() {
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
     });
 
+    it('is able to update a key set to undefined', async function() {
+      await fireStash.update('contacts', '3', { foo: 'bar' });
+      assert.deepStrictEqual(await fireStash.get('contacts', '3'), { foo: 'bar' });
+      assert.deepStrictEqual((await fireStash.db.doc('contacts/3').get()).data(), { foo: 'bar' });
+
+      await fireStash.update('contacts', '3', { foo: undefined });
+      assert.deepStrictEqual(await fireStash.get('contacts', '3'), { });
+      assert.deepStrictEqual((await fireStash.db.doc('contacts/3').get()).data(), { });
+    });
+
     it('handles multiple updates to the same key and object', async function() {
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => {

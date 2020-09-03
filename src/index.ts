@@ -42,6 +42,22 @@ function pageSize(): number {
   return process.env.FIRESTASH_PAGINATION || PAGINATION;
 }
 
+/* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+function ensureFirebaseSafe(obj: any, depth = 0): void {
+  if (depth > 10) { return; }
+  if (Array.isArray(obj)) { return; }
+  if (typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      if (obj[key] === undefined) {
+        obj[key] = Firebase.firestore.FieldValue.delete();
+      }
+      else if (Object.prototype.toString.call(obj[key]) === '[object Object]') {
+        ensureFirebaseSafe(obj[key], depth++);
+      }
+    }
+  }
+}
+
 interface InternalStash {
   __dirty__?: true;
 }
@@ -244,6 +260,7 @@ export default class FireStash extends EventEmitter {
           // For each object we've been asked to update (run at least once even if no object was presented)...
           for (const obj of objects.length ? objects : [null]) {
             if (obj) {
+              ensureFirebaseSafe(obj);
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
               count += 1; // +1 for object merge
             }
@@ -598,8 +615,9 @@ export default class FireStash extends EventEmitter {
             localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
           }
           delete localObj.__dirty__;
-          await this.level.put(id, JSON.stringify(localObj));
-          this.documentMemo[id] = localObj;
+          const val = JSON.stringify(localObj);
+          await this.level.put(id, val);
+          this.documentMemo[id] = JSON.parse(val);
         }
         this.emit(id, collection, [key]);
         keyIds.push(key);
