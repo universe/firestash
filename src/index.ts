@@ -71,6 +71,16 @@ export interface IFireStash<T = number> {
 //   return [ 'firestash', ...collection.split('/').slice(0, -1) ].join('/');
 // }
 
+export interface FireStashOptions {
+  lowMem: boolean;
+  directory: string | null;
+}
+
+const DEFAULT_OPTIONS: FireStashOptions = {
+  lowMem: false,
+  directory: null,
+};
+
 export default class FireStash extends EventEmitter {
   toUpdate: Map<string, Map<string, (object | null)[]>> = new Map();
   firebase: typeof Firebase;
@@ -82,6 +92,7 @@ export default class FireStash extends EventEmitter {
   timeout: NodeJS.Timeout | null = null;
   timeoutPromise: Promise<void> = Promise.resolve();
   level: LevelUp;
+  options: FireStashOptions = DEFAULT_OPTIONS;
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -89,13 +100,18 @@ export default class FireStash extends EventEmitter {
    * @param app The Firebase App Instance.
    * @param directory The cache backup directory (optional)
    */
-  constructor(firebase: typeof Firebase, app: Firebase.app.App, directory: string | null = null) {
+  constructor(firebase: typeof Firebase, app: Firebase.app.App, directory: string | Partial<FireStashOptions> | null = null) {
     super();
     this.firebase = firebase;
     this.app = app;
     this.db = this.app.firestore();
-    this.dir = directory;
+    this.dir = typeof directory === 'string' ? directory : directory?.directory || null;
     this.log = console;
+
+    if (typeof directory === 'object') {
+      Object.assign(this.options, directory);
+    }
+
     if (this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
@@ -265,11 +281,13 @@ export default class FireStash extends EventEmitter {
               count += 1; // +1 for object merge
             }
             else {
-              const localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
-              const id = `${collection}/${key}`;
-              localObj.__dirty__ = true;
-              localBatch.put(id, JSON.stringify(localObj));
-              this.documentMemo[id] = localObj;
+              if (!this.options.lowMem) {
+                const localObj: (object & InternalStash) | null = await this.safeGet(collection, key) || {};
+                const id = `${collection}/${key}`;
+                localObj.__dirty__ = true;
+                localBatch.put(id, JSON.stringify(localObj));
+                this.documentMemo[id] = localObj;
+              }
               const keys = events.get(collection) || new Set();
               keys.add(key);
               events.set(collection, keys);
@@ -294,8 +312,10 @@ export default class FireStash extends EventEmitter {
         }
 
         // Queue a commit of our collection's local state.
-        localStash ? localBatch.put(collection, JSON.stringify(localStash)) : localBatch.del(collection);
-        this.stashPagesMemo[collection] = localStash;
+        if (!this.options.lowMem) {
+          localStash ? localBatch.put(collection, JSON.stringify(localStash)) : localBatch.del(collection);
+          this.stashPagesMemo[collection] = localStash;
+        }
 
         // Re-calculate stashMemo on next stash() request.
         delete this.stashMemo[collection];
