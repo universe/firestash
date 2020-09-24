@@ -27,7 +27,10 @@ describe('Connector', function() {
     });
 
     after(async() => {
+      await fireStash.stop();
+      await fireTest.clearFirestoreData({ projectId });
       await app.delete();
+      process.exit(0);
     });
 
     it('is able to insert a key', async function() {
@@ -409,6 +412,72 @@ describe('Connector', function() {
       assert.deepStrictEqual((await fireStash.get('collection5/element/page')), collection, 'Updates existing cache entries on multiple pages 6.');
 
       process.env.FIRESTASH_PAGINATION = undefined;
+    });
+
+    it('listens to remote', async function() {
+      let called = 0;
+      const cacheKey = fireStash.cacheKey('contacts', 0);
+      await fireStash.update('contacts', 'id1');
+      fireStash.on('contacts', () => called++);
+      await fireStash.watch('contacts');
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
+      const cache = (await fireStash.db.collection('firestash').doc(cacheKey).get()).data();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
+      if (!cache) throw new Error('No Cache Object');
+
+      cache.cache.id1++;
+      await fireStash.db.collection('firestash').doc(cacheKey).set(cache, { merge: true });
+      cache.cache.id1++;
+      await fireStash.db.collection('firestash').doc(cacheKey).set(cache, { merge: true });
+      await wait(1200);
+
+      cache.cache.id1++;
+      await fireStash.db.collection('firestash').doc(cacheKey).set(cache, { merge: true });
+      await wait(1200);
+
+      assert.strictEqual(called, 2, 'Listens for remote updates');
+    });
+
+    it('throttles listener when updates exceed one per second', async function() {
+      let called = 0;
+      const cacheKey = fireStash.cacheKey('contacts', 0);
+      await fireStash.update('contacts', 'id1');
+      fireStash.on('contacts', () => ++called);
+      await fireStash.watch('contacts');
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
+      const cache = (await fireStash.db.collection('firestash').doc(cacheKey).get()).data();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
+      if (!cache) throw new Error('No Cache Object');
+
+      for (let i = 0; i < 4; i++) {
+        cache.cache.id1++;
+        await fireStash.db.collection('firestash').doc(cacheKey).set(cache, { merge: true });
+        await wait(180);
+      }
+
+      await wait(5000);
+      assert.strictEqual(called, 4, 'Listens for remote updates');
+    });
+
+    it('throttles listener when updates exceed a consistent one per second and updates', async function() {
+      let called = 0;
+      const cacheKey = fireStash.cacheKey('contacts', 0);
+      await fireStash.update('contacts', 'id1');
+      fireStash.on('contacts', () => ++called && console.log(Date.now()));
+      await fireStash.watch('contacts');
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
+      const cache = (await fireStash.db.collection('firestash').doc(cacheKey).get()).data();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
+      if (!cache) throw new Error('No Cache Object');
+
+      for (let i = 0; i < 30; i++) {
+        cache.cache.id1++;
+        await fireStash.db.collection('firestash').doc(cacheKey).set(cache, { merge: true });
+        await wait(200);
+      }
+
+      await wait(5000);
+      assert.strictEqual(called, 9, 'Listens for remote updates');
     });
   });
 });

@@ -121,6 +121,8 @@ export default class FireStash extends EventEmitter {
     }
   }
 
+  cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
+
   /**
    * Resolves when all previously called updates are written to remote. Like requestAnimationFrame for the collection cache.
    */
@@ -357,7 +359,7 @@ export default class FireStash extends EventEmitter {
    */
   private modified: Map<string, Set<string>> = new Map();
   private eventsTimer: NodeJS.Timeout | null = null;
-  private async mergeRemote(collection: string, update: FirebaseFirestore.DocumentSnapshot[]) {
+  private async mergeRemote(collection: string, update: FirebaseFirestore.DocumentSnapshot[]): Promise<boolean> {
     // Fetch the local stash object for this collection that has just updated.
     const local: Record<string, IFireStash | undefined> = await this.stashPages(collection) || {};
 
@@ -409,6 +411,8 @@ export default class FireStash extends EventEmitter {
 
     // Ensure we're scheduled for an event trigger.
     this.eventsTimer = this.eventsTimer || setTimeout(this.triggerChangeEvents.bind(this), 180);
+
+    return !!modified.length;
   }
 
   /**
@@ -439,12 +443,42 @@ export default class FireStash extends EventEmitter {
     // Return new promise that resolves after initial snapshot is done.
     return new Promise((resolve, reject) => {
       let firstCall: boolean | void = true;
-      const unsubscribe = this.db.collection('firestash').where('collection', '==', collection).onSnapshot(async(update) => {
+      let callsThisSecond = 0;
+      let lastUpdate = 0;
+      let unsubscribe: (() => void) | null = null;
+      const query = this.db.collection('firestash').where('collection', '==', collection);
+      const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
+        const now = Date.now();
         const docs: FirebaseFirestore.DocumentSnapshot[] = [];
         update.docChanges().forEach((change) => docs.push(change.doc));
-        await this.mergeRemote(collection, docs);
+
+        const changed = await this.mergeRemote(collection, docs);
+
+        if (unsubscribe) {
+          (now - lastUpdate < 1000) ? (callsThisSecond += 1) : (callsThisSecond = 0);
+          if (callsThisSecond >= 3) {
+            unsubscribe();
+            unsubscribe = null;
+            callsThisSecond = 0;
+          }
+        }
+
+        if (!unsubscribe) {
+          (!changed) ? (callsThisSecond += 1) : (callsThisSecond = 0);
+          if (callsThisSecond >= 3) {
+            callsThisSecond = 0;
+            unsubscribe = query.onSnapshot(handleSnapshot, reject);
+          }
+          else {
+            setTimeout(() => query.get().then(handleSnapshot, reject), 1000);
+          }
+        }
+
+        lastUpdate = now;
         firstCall && (firstCall = resolve());
-      }, reject);
+      };
+
+      unsubscribe = query.onSnapshot(handleSnapshot, reject);
       this.watchers.set(collection, unsubscribe);
     });
   }
