@@ -12,7 +12,7 @@
     // Compilation Configuration
     "target": "es2017",
     "inlineSources": true,
-    "inlineSourceMap": true,
+    "sourceMap": true,
     "declaration": true,
     "allowSyntheticDefaultImports": true,
 

@@ -350,6 +350,8 @@ export default class FireStash extends EventEmitter {
     catch (err) {
       this.log.error(`[FireStash] Error persisting FireStash ${promises.length} data updates.`, err);
     }
+
+    this.options.lowMem && collectionStashes.clear();
   }
 
   /**
