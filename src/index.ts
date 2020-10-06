@@ -580,7 +580,7 @@ export default class FireStash extends EventEmitter {
       return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
     }
     this.getRequestsMemo.set(memoKey, (async() => {
-      let out: Record<string, T | null> = {};
+      const out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
       if (ids.size > 0 && ids.size <= 30) {
         for (const id of ids) {
@@ -590,7 +590,6 @@ export default class FireStash extends EventEmitter {
         }
       }
       else {
-        let data = '';
         await new Promise((resolve) => {
           const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
           stream.on('data', (dat) => {
@@ -614,19 +613,19 @@ export default class FireStash extends EventEmitter {
             if ((ids.size && !ids.has(key)) || id === collection || key.includes('/')) { return; }
 
             // If dirty, queue for fetch, otherwise add to our JSON return.
-            if (record && !record.includes('__dirty__')) { data += `${data ? ',' : ''}"${key}": ${record}`; }
+            if (record && !record.includes('__dirty__')) {
+              try {
+                out[key] = JSON.parse(record);
+              }
+              catch (err) {
+                this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`);
+              }
+            }
             else { modified.add(key); }
           });
           stream.on('error', () => resolve());
           stream.on('close', () => resolve());
           stream.on('end', () => resolve());
-        }).then(() => {
-          try {
-            out = JSON.parse(`{ ${data} }`);
-          }
-          catch (err) {
-            this.log.error(`[FireStash] Error parsing batch get for '${collection}'.`);
-          }
         });
       }
 
