@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "0.14.3",
+  "version": "0.15.0",
   "main": "dist/src/index.js",
   "license": "MIT",
   "private": false,
@@ -27,7 +27,7 @@
     "dist/src"
   ],
   "peerDependencies": {
-    "firebase-admin": "^9.0.0"
+    "firebase-admin": "^9.2.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^8.2.0",

@@ -132,6 +132,15 @@ export default class FireStash extends EventEmitter {
   private stashPagesMemo: Record<string, Record<string, IFireStash | undefined>> = {};
   private async stashPages(collection: string): Promise<Record<string, IFireStash | undefined>> {
     if (this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
+    if (this.options.lowMem) {
+      const out: Record<string, IFireStash> = {};
+      const res = await this.db.collection('firestash').where('collection', '==', collection).get();
+      for (const doc of res.docs) {
+        const dat = doc.data() as IFireStash | undefined;
+        dat && (out[doc.id] = dat);
+      }
+      return out;
+    }
     try {
       return this.stashPagesMemo[collection] = (JSON.parse(await this.level.get(collection, { asBuffer: false }) || '{}') as Record<string, IFireStash>);
     }
@@ -510,7 +519,12 @@ export default class FireStash extends EventEmitter {
   private async safeGet<T=object>(collection: string, key: string): Promise<T | null> {
     const id = `${collection}/${key}`;
     if (this.documentMemo[id]) { return this.documentMemo[id] as unknown as T; }
-    try { return (this.documentMemo[id] = JSON.parse((await this.level.get(id, { asBuffer: false }) || '{}'))) as T; }
+    if (this.options.lowMem) { return null; }
+    try {
+      const o = JSON.parse((await this.level.get(id, { asBuffer: false }) || '{}')) as T;
+      !this.options.lowMem && (this.documentMemo[id] = o as unknown as object);
+      return o;
+    }
     catch (_err) { return null; }
   }
 
@@ -585,8 +599,14 @@ export default class FireStash extends EventEmitter {
       if (ids.size > 0 && ids.size <= 30) {
         for (const id of ids) {
           const record = await this.safeGet<T & InternalStash>(collection, id);
-          if (record && !record.__dirty__) { out[id] = record; }
+          if (record && !record.__dirty__ && !this.options.lowMem) { out[id] = record; }
           else { modified.add(id); }
+        }
+      }
+      else if (this.options.lowMem) {
+        const ids = id ? (Array.isArray(id) ? id : [id]) : Object.keys((await this.stash(collection)).cache);
+        for (const id of ids) {
+          modified.add(id);
         }
       }
       else {
@@ -613,7 +633,7 @@ export default class FireStash extends EventEmitter {
             if ((ids.size && !ids.has(key)) || id === collection || key.includes('/')) { return; }
 
             // If dirty, queue for fetch, otherwise add to our JSON return.
-            if (record && !record.includes('__dirty__')) {
+            if (record && !record.includes('__dirty__') && !this.options.lowMem) {
               try {
                 out[key] = JSON.parse(record);
               }
@@ -640,7 +660,7 @@ export default class FireStash extends EventEmitter {
           delete obj?.__dirty__;
           if (obj) {
             batch.put(id, JSON.stringify(obj));
-            this.documentMemo[id] = obj;
+            !this.options.lowMem && (this.documentMemo[id] = obj);
           }
           else {
             batch.del(id);
@@ -703,7 +723,7 @@ export default class FireStash extends EventEmitter {
       collectionMap.set(key, objSet);
       objSet.add(obj);
       // Ensure we're ready to trigger events on next tick.
-      if (!this.drainEventsTimer) {
+      if (!this.drainEventsTimer && !this.options.lowMem) {
         this.drainEventsTimer = setImmediate(() => this.drainEventsPromise = this.drainEvents());
       }
     }
