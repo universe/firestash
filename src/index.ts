@@ -456,7 +456,7 @@ export default class FireStash extends EventEmitter {
       let firstCall: boolean | void = true;
       let callsThisSecond = 0;
       let lastUpdate = 0;
-      let unsubscribe: (() => void) | null = null;
+      let liveWatcher: (() => void) | null = null;
       const query = this.db.collection('firestash').where('collection', '==', collection);
       const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
         const now = Date.now();
@@ -465,23 +465,26 @@ export default class FireStash extends EventEmitter {
 
         const changed = await this.mergeRemote(collection, docs);
 
-        if (unsubscribe) {
+        if (liveWatcher) {
+          // Increment our callsThisSecond if called within a second of the last call, otherwise reset to zero.
           (now - lastUpdate < 1000) ? (callsThisSecond += 1) : (callsThisSecond = 0);
           if (callsThisSecond >= 3) {
-            unsubscribe();
-            unsubscribe = null;
+            liveWatcher();
+            liveWatcher = null;
             callsThisSecond = 0;
           }
         }
 
-        if (!unsubscribe) {
+        if (!liveWatcher) {
           (!changed) ? (callsThisSecond += 1) : (callsThisSecond = 0);
           if (callsThisSecond >= 3) {
             callsThisSecond = 0;
-            unsubscribe = query.onSnapshot(handleSnapshot, reject);
+            liveWatcher = query.onSnapshot(handleSnapshot, reject);
+            this.watchers.set(collection, liveWatcher);
           }
           else {
-            setTimeout(() => query.get().then(handleSnapshot, reject), 1000);
+            const timeoutId = setTimeout(() => query.get().then(handleSnapshot, reject), 1000);
+            this.watchers.set(collection, () => clearTimeout(timeoutId));
           }
         }
 
@@ -489,8 +492,8 @@ export default class FireStash extends EventEmitter {
         firstCall && (firstCall = resolve());
       };
 
-      unsubscribe = query.onSnapshot(handleSnapshot, reject);
-      this.watchers.set(collection, unsubscribe);
+      liveWatcher = query.onSnapshot(handleSnapshot, reject);
+      this.watchers.set(collection, liveWatcher);
     });
   }
 
@@ -500,6 +503,8 @@ export default class FireStash extends EventEmitter {
   async unwatch(collection: string) {
     const unsubscribe = this.watchers.get(collection);
     unsubscribe && unsubscribe();
+    this.watchers.delete(collection);
+    await this.allSettled();
   }
 
   /**
