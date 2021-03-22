@@ -1,4 +1,4 @@
-import Firebase from 'firebase-admin';
+import type Firebase from 'firebase-admin';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import * as fs from 'fs-extra';
@@ -42,16 +42,16 @@ function pageSize(): number {
 }
 
 /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-function ensureFirebaseSafe(obj: any, depth = 0): void {
+function ensureFirebaseSafe(obj: any, FieldValue: typeof Firebase.firestore.FieldValue, depth = 0): void {
   if (depth > 10) { return; }
   if (Array.isArray(obj)) { return; }
   if (typeof obj === 'object') {
     for (const key of Object.keys(obj)) {
       if (obj[key] === undefined) {
-        obj[key] = Firebase.firestore.FieldValue.delete();
+        obj[key] = FieldValue.delete();
       }
       else if (Object.prototype.toString.call(obj[key]) === '[object Object]') {
-        ensureFirebaseSafe(obj[key], depth++);
+        ensureFirebaseSafe(obj[key], FieldValue, depth++);
       }
     }
   }
@@ -91,7 +91,7 @@ export default class FireStash extends EventEmitter {
   timeout: NodeJS.Timeout | null = null;
   timeoutPromise: Promise<void> = Promise.resolve();
   level: LevelUp;
-  options: FireStashOptions = DEFAULT_OPTIONS;
+  options: FireStashOptions = { ...DEFAULT_OPTIONS };
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -286,7 +286,7 @@ export default class FireStash extends EventEmitter {
           // For each object we've been asked to update (run at least once even if no object was presented)...
           for (const obj of objects.length ? objects : [null]) {
             if (obj) {
-              ensureFirebaseSafe(obj);
+              ensureFirebaseSafe(obj, FieldValue);
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
               count += 1; // +1 for object merge
             }
