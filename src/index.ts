@@ -444,7 +444,7 @@ export default class FireStash extends EventEmitter {
   async onThrottledSnapshot(
     documentPath: string,
     callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
-    timeout: number = 1000
+    timeout = 1000,
   ): Promise<void> {
     let callsThisTimeout = 0;
     let numNoChangeTimeouts = 0;
@@ -456,7 +456,7 @@ export default class FireStash extends EventEmitter {
         if (callsThisTimeout >= 3) {
           // Cancel the snapshot listener.
           onSnapshotListener();
-  
+
           // Switch to polling for updates every timeout milliseconds.
           timeoutId = setTimeout(async() => {
             // If we go three timeout windows with no new data in the document while polling...
@@ -466,22 +466,26 @@ export default class FireStash extends EventEmitter {
               // Rebind the onSnapshot listener.
               onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot);
               callsThisTimeout = 0;
-            } else {
+              numNoChangeTimeouts = 0;
+            }
+            else {
               const doc = await this.db.doc(documentPath).get();
               const changed = await this.mergeRemote(documentPath, [doc]);
               if (changed) {
                 callback(doc);
-              } else {
+              }
+              else {
                 numNoChangeTimeouts++;
               }
             }
-           },  timeout);
-        } else {
+          }, timeout);
+        }
+        else {
           callback(snapshot);
           callsThisTimeout++;
         }
       }
-    }
+    };
 
     // Set the snapshot listener.
     onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot);
