@@ -92,6 +92,7 @@ export default class FireStash extends EventEmitter {
   timeoutPromise: Promise<void> = Promise.resolve();
   level: LevelUp;
   options: FireStashOptions = { ...DEFAULT_OPTIONS };
+  throttledSnapshotCallbacks: Map<string, Set<(snapshot: FirebaseFirestore.DocumentSnapshot) => void>> = new Map();
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -442,16 +443,11 @@ export default class FireStash extends EventEmitter {
   }
 
   async onThrottledSnapshot(
-    documentPath: string,
+    documentPath: string, // app/config
     callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
     timeout = 1000,
   ): Promise<() => void> {
-    // If we've already started the watcher, return.
-    const pending = this.watchers.get(documentPath);
-    if (pending) { return pending; }
-
     return new Promise((resolve, reject) => {
-      let firstCall: boolean | void = true;
       let timeoutWindowStart = Date.now();
       let callsThisTimeout = 0;
       let numNoChangeTimeouts = 0;
@@ -489,13 +485,25 @@ export default class FireStash extends EventEmitter {
             onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
           }
         }
-        callback(snapshot);
-        firstCall && (firstCall = resolve());
+
+        const callbacks = this.throttledSnapshotCallbacks[documentPath] as Set<(snapshot: FirebaseFirestore.DocumentSnapshot) => void>;
+        callbacks.forEach(callback => {
+          callback(snapshot);
+        });
       };
 
       // Set the snapshot listener.
-      onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
-      this.watchers.set(documentPath, onSnapshotListener);
+      if (!(documentPath in this.throttledSnapshotCallbacks)) {
+        this.throttledSnapshotCallbacks[documentPath] = new Set();
+        onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
+      }
+      this.throttledSnapshotCallbacks[documentPath].add(callback);
+      resolve(() => {
+        this.throttledSnapshotCallbacks[documentPath]?.delete(callback);
+        if (this.throttledSnapshotCallbacks[documentPath]?.length === 0) {
+          onSnapshotListener && onSnapshotListener();
+        };
+      });
     });
   }
 

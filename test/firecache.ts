@@ -532,22 +532,20 @@ describe('Connector', function() {
       assert.strictEqual(called, 9, 'Listens for remote updates');
     });
 
-    it('uses onSnapshot to listen to remote', async function() {
+    it('uses throttled onSnapshot to listen to remote', async function() {
       let called = 0;
       await fireStash.onThrottledSnapshot('app/config', () => called++, 1000);
 
       fireStash.db.doc('app/config').set({ foo: 'a' });
       await wait(200);
       fireStash.db.doc('app/config').set({ foo: 'b' });
-      await wait(200);
-
+      await wait(1500);
       assert.strictEqual(called, 3, 'Listens for remote updates');
     });
 
     it('if onSnapshot listener gets more than 3 updates in a timeout window, it falls back to polling', async function() {
       let called = 0;
       await fireStash.onThrottledSnapshot('app/config', () => called++, 2000);
-      assert.strictEqual(called, 1, 'Initial num called');
 
       for (let i = 0; i <= 30; i++) {
         await fireStash.db.doc('app/config').set({ foo: i });
@@ -557,32 +555,59 @@ describe('Connector', function() {
       assert.strictEqual(called, 5, 'Num called after snapshot updates');
     });
 
-    it.only('if onSnapshot listener gets more than 3 updates with no changes while polling, it returns to using onSnapshot', async function() {
-      try {
-        let called = 0;
-        await fireStash.onThrottledSnapshot('app/config', () => called++, 1000);
-        assert.strictEqual(called, 1, 'Initial num called');
+    it('if onSnapshot listener gets more than 3 updates with no changes while polling, it returns to using onSnapshot', async function() {
+      let called = 0;
+      await fireStash.onThrottledSnapshot('app/config', () => called++, 1000);
 
-        for (let i = 0; i <= 5; i++) {
-          await fireStash.db.doc('app/config').set({ foo: i });
-          await wait(50);
-        }
-        await wait(850);
-        assert.strictEqual(called, 4, 'Num called after snapshot updates');
-
-        await wait(2950);
-        assert.strictEqual(called, 8, 'Num called after polling 3x and switching back');
-
-        // Back to listening for regular snapshots.
-        for (let i = 0; i <= 10; i++) { // 3 before polling, 1 after polling
-          await fireStash.db.doc('app/config').set({ foo: i });
-          await wait(100);
-        }
-        assert.strictEqual(called, 12, 'Final num calls');
+      for (let i = 0; i <= 5; i++) {
+        await fireStash.db.doc('app/config').set({ foo: i });
+        await wait(50);
       }
-      catch (e) {
-        console.log(e);
+      await wait(850);
+
+      // Wait for polling updates...
+      await wait(2950);
+
+      // Back to listening for regular snapshots.
+      for (let i = 0; i <= 10; i++) { // 3 before polling, 1 after polling
+        await fireStash.db.doc('app/config').set({ foo: i });
+        await wait(100);
       }
+      assert.strictEqual(called, 12, 'Final num calls');
+    });
+
+    it('throttled snapshot listener can handle multiple callbacks', async function() {
+      const called = { a: 0, b: 0, c: 0 };
+
+      await fireStash.onThrottledSnapshot('app/config', () => called.a += 1);
+      await fireStash.onThrottledSnapshot('app/config', () => called.b += 1);
+      await fireStash.onThrottledSnapshot('app/config', () => called.c += 1);
+
+      await fireStash.db.doc('app/config').set({ foo: 1 });
+      await wait(100);
+      await fireStash.db.doc('app/config').set({ foo: 2 });
+      await wait(100);
+
+      assert.strictEqual(called.toString(), { a: 3, b: 3 }.toString(), 'Final num called');
+    });
+
+    it('unsubscribe onSnapshot listener', async function() {
+      const called = { a: 0, b: 0 };
+      const a = await fireStash.onThrottledSnapshot('app/config', () => called.a += 1);
+      await fireStash.onThrottledSnapshot('app/config', () => called.b += 1);
+      assert.strictEqual(called.toString(), { a: 1, b: 1 }.toString(), 'Initial num called');
+
+      await fireStash.db.doc('app/config').set({ foo: 1 });
+      await wait(100);
+      assert.strictEqual(called.toString(), { a: 2, b: 2 }.toString(), 'Num called after first change');
+
+      // Unsubscribe the first callback.
+      a();
+
+      await fireStash.db.doc('app/config').set({ foo: 2 });
+      await wait(100);
+
+      assert.strictEqual(called.toString(), { a: 2, b: 3 }.toString(), 'Final number called');
     });
   });
 });
