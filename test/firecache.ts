@@ -531,5 +531,58 @@ describe('Connector', function() {
       await wait(5000);
       assert.strictEqual(called, 9, 'Listens for remote updates');
     });
+
+    it('uses onSnapshot to listen to remote', async function() {
+      let called = 0;
+      await fireStash.onThrottledSnapshot('app/config', () => called++, 1000);
+
+      fireStash.db.doc('app/config').set({ foo: 'a' });
+      await wait(200);
+      fireStash.db.doc('app/config').set({ foo: 'b' });
+      await wait(200);
+
+      assert.strictEqual(called, 3, 'Listens for remote updates');
+    });
+
+    it('if onSnapshot listener gets more than 3 updates in a timeout window, it falls back to polling', async function() {
+      let called = 0;
+      await fireStash.onThrottledSnapshot('app/config', () => called++, 2000);
+      assert.strictEqual(called, 1, 'Initial num called');
+
+      for (let i = 0; i <= 30; i++) {
+        await fireStash.db.doc('app/config').set({ foo: i });
+        await wait(50);
+      }
+      await wait(2500);
+      assert.strictEqual(called, 5, 'Num called after snapshot updates');
+    });
+
+    it.only('if onSnapshot listener gets more than 3 updates with no changes while polling, it returns to using onSnapshot', async function() {
+      try {
+        let called = 0;
+        await fireStash.onThrottledSnapshot('app/config', () => called++, 1000);
+        assert.strictEqual(called, 1, 'Initial num called');
+
+        for (let i = 0; i <= 5; i++) {
+          await fireStash.db.doc('app/config').set({ foo: i });
+          await wait(50);
+        }
+        await wait(850);
+        assert.strictEqual(called, 4, 'Num called after snapshot updates');
+
+        await wait(2950);
+        assert.strictEqual(called, 8, 'Num called after polling 3x and switching back');
+
+        // Back to listening for regular snapshots.
+        for (let i = 0; i <= 10; i++) { // 3 before polling, 1 after polling
+          await fireStash.db.doc('app/config').set({ foo: i });
+          await wait(100);
+        }
+        assert.strictEqual(called, 12, 'Final num calls');
+      }
+      catch (e) {
+        console.log(e);
+      }
+    });
   });
 });

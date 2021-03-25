@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { clearTimeout } from 'timers';
+import { clearInterval, clearTimeout } from 'timers';
 import levelup, { LevelUp } from 'levelup';
 import leveldown from 'leveldown';
 import memdown from 'memdown';
@@ -445,50 +445,58 @@ export default class FireStash extends EventEmitter {
     documentPath: string,
     callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
     timeout = 1000,
-  ): Promise<void> {
-    let callsThisTimeout = 0;
-    let numNoChangeTimeouts = 0;
-    let onSnapshotListener: (() => void) | null = null;
+  ): Promise<() => void> {
+    // If we've already started the watcher, return.
+    const pending = this.watchers.get(documentPath);
+    if (pending) { return pending; }
 
-    const handleSnapshot = (snapshot: FirebaseFirestore.DocumentSnapshot) => {
-      let timeoutId: NodeJS.Timeout;
-      if (onSnapshotListener) {
-        if (callsThisTimeout >= 3) {
-          // Cancel the snapshot listener.
-          onSnapshotListener();
+    return new Promise((resolve, reject) => {
+      let firstCall: boolean | void = true;
+      let timeoutWindowStart = Date.now();
+      let callsThisTimeout = 0;
+      let numNoChangeTimeouts = 0;
+      let onSnapshotListener: (() => void) | null = null;
+      let interval: NodeJS.Timeout | null = null;
+      let lastUpdateTime = 0;
 
-          // Switch to polling for updates every timeout milliseconds.
-          timeoutId = setTimeout(async() => {
-            // If we go three timeout windows with no new data in the document while polling...
-            if (numNoChangeTimeouts >= 3) {
-              // Cancel the interval.
-              clearTimeout(timeoutId);
-              // Rebind the onSnapshot listener.
-              onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot);
-              callsThisTimeout = 0;
-              numNoChangeTimeouts = 0;
-            }
-            else {
-              const doc = await this.db.doc(documentPath).get();
-              const changed = await this.mergeRemote(documentPath, [doc]);
-              if (changed) {
-                callback(doc);
-              }
-              else {
-                numNoChangeTimeouts++;
-              }
-            }
-          }, timeout);
+      const handleSnapshot = async(snapshot: FirebaseFirestore.DocumentSnapshot) => {
+        const now = Date.now();
+        const updateTime = snapshot.updateTime?.toMillis() || 0;
+        const changed = updateTime !== lastUpdateTime;
+        lastUpdateTime = updateTime;
+
+        if (onSnapshotListener) {
+          if (now - timeoutWindowStart >= timeout) {
+            timeoutWindowStart = now;
+            callsThisTimeout = 0;
+          }
+          else callsThisTimeout += 1;
+          if (callsThisTimeout >= 3) {
+            // Cancel the snapshot listener.
+            onSnapshotListener();
+            onSnapshotListener = null;
+            callsThisTimeout = 0;
+            // Switch to polling.
+            interval = setInterval(() => this.db.doc(documentPath).get().then(handleSnapshot, reject), timeout);
+          }
         }
         else {
-          callback(snapshot);
-          callsThisTimeout++;
+          if (!changed) ++numNoChangeTimeouts;
+          if (numNoChangeTimeouts >= 3) {
+            // Cancel the interval.
+            interval && clearInterval(interval);
+            numNoChangeTimeouts = 0;
+            onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
+          }
         }
-      }
-    };
+        callback(snapshot);
+        firstCall && (firstCall = resolve());
+      };
 
-    // Set the snapshot listener.
-    onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot);
+      // Set the snapshot listener.
+      onSnapshotListener = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
+      this.watchers.set(documentPath, onSnapshotListener);
+    });
   }
 
   /**
