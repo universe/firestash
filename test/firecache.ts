@@ -607,7 +607,15 @@ describe('Connector', function() {
       await fireStash.db.doc('app/config').set({ foo: 2 });
       await wait(100);
 
-      assert.strictEqual(called.toString(), { a: 2, b: 3 }.toString(), 'Final number called');
+      assert.strictEqual(called.toString(), { a: 2, b: 3 }.toString(), 'Num called after unsubscribe');
+
+      // Resubscribe the first callback.
+      await fireStash.onThrottledSnapshot('app/config', () => called.a += 1);
+
+      await fireStash.db.doc('app/config').set({ foo: 3 });
+      await wait(100);
+
+      assert.strictEqual(called.toString(), { a: 3, b: 4 }.toString(), 'Final num called');
     });
   });
 });
