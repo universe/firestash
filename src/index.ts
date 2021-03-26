@@ -449,7 +449,7 @@ export default class FireStash extends EventEmitter {
   }
 
   async onThrottledSnapshot(
-    documentPath: string, // app/config
+    documentPath: string,
     callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
     timeout = 1000,
   ): Promise<() => void> {

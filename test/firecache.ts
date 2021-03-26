@@ -533,7 +533,7 @@ describe('Connector', function() {
     });
 
     it.only('uses throttled onSnapshot to listen to remote', async function() {
-        const path = 'foo/bar1';
+      const path = 'foo/bar1';
       let called = 0;
       await fireStash.onThrottledSnapshot(path, () => called++);
 
@@ -541,7 +541,7 @@ describe('Connector', function() {
       await wait(200);
       fireStash.db.doc(path).set({ foo: 'b' });
       await wait(1500);
-      assert.strictEqual(called, 3, 'Listens for remote updates'); 
+      assert.strictEqual(called, 3, 'Listens for remote updates');
     });
 
     it.only('if onSnapshot listener gets more than 3 updates in a timeout window, it falls back to polling', async function() {
