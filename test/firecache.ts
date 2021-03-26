@@ -569,7 +569,7 @@ describe('Connector', function() {
       await wait(850);
 
       // Wait for polling updates...
-      await wait(2950);
+      await wait(3000);
 
       // Back to listening for regular snapshots.
       for (let i = 0; i <= 10; i++) { // 3 before polling, 1 after polling
@@ -615,7 +615,6 @@ describe('Connector', function() {
       const c = await fireStash.onThrottledSnapshot(path, () => called.a += 1);
       await wait(100);
       await fireStash.db.doc(path).set({ foo: 3 });
-      console.log(called)
       assert.deepStrictEqual(called, { a: 3, b: 4 }, 'Num called after resubscribe');
 
       await wait(1500);
@@ -626,7 +625,6 @@ describe('Connector', function() {
         await wait(20);
       }
       await wait(100);
-      console.log(called);
       assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Num called after polling kicks in');
 
       // Unsubscribe both.

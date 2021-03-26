@@ -457,12 +457,12 @@ export default class FireStash extends EventEmitter {
       let timeoutWindowStart = Date.now();
       let callsThisTimeout = 0;
       let numNoChangeTimeouts = 0;
-      let intervalId: NodeJS.Timeout | null = this.throttledSnapshotCallbacks.get(documentPath)?.intervalId || null;
       let lastUpdateTime = 0;
 
       const handleSnapshot = async(snapshot: FirebaseFirestore.DocumentSnapshot) => {
         const throttledSnapshot = this.throttledSnapshotCallbacks.get(documentPath);
         if (!throttledSnapshot) return;
+        const intervalId: NodeJS.Timeout | null = throttledSnapshot.intervalId || null;
         const onSnapshotListener = throttledSnapshot.onSnapshotUnsubscribe;
 
         const now = Date.now();
@@ -482,7 +482,7 @@ export default class FireStash extends EventEmitter {
             throttledSnapshot.onSnapshotUnsubscribe = null;
             callsThisTimeout = 0;
             // Switch to polling.
-            intervalId = setInterval(() => this.db.doc(documentPath).get().then(handleSnapshot, reject), timeout);
+            throttledSnapshot.intervalId = setInterval(() => this.db.doc(documentPath).get().then(handleSnapshot, reject), timeout);
           }
         }
         else {
@@ -490,6 +490,7 @@ export default class FireStash extends EventEmitter {
           if (numNoChangeTimeouts >= 3) {
             // Cancel the interval.
             intervalId && clearInterval(intervalId);
+            throttledSnapshot.intervalId = null;
             numNoChangeTimeouts = 0;
             throttledSnapshot.onSnapshotUnsubscribe = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
           }
@@ -503,7 +504,7 @@ export default class FireStash extends EventEmitter {
       const throttledSnapshot = {
         callbacks,
         onSnapshotUnsubscribe: this.throttledSnapshotCallbacks.get(documentPath)?.onSnapshotUnsubscribe || this.db.doc(documentPath).onSnapshot(handleSnapshot, reject),
-        intervalId,
+        intervalId: null,
       };
       this.throttledSnapshotCallbacks.set(documentPath, throttledSnapshot);
 
