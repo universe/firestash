@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { clearTimeout } from 'timers';
+import { clearInterval, clearTimeout } from 'timers';
 import levelup, { LevelUp } from 'levelup';
 import leveldown from 'leveldown';
 import memdown from 'memdown';
@@ -22,6 +22,12 @@ declare global {
       FIRESTASH_PAGINATION: number | undefined;
     }
   }
+}
+
+interface ThrottledSnapshot {
+  callbacks: Set<(snapshot: FirebaseFirestore.DocumentSnapshot) => void>;
+  onSnapshotUnsubscribe: (() => void) | null;
+  intervalId: NodeJS.Timeout | null;
 }
 
 /* eslint-disable-next-line */
@@ -92,6 +98,7 @@ export default class FireStash extends EventEmitter {
   timeoutPromise: Promise<void> = Promise.resolve();
   level: LevelUp;
   options: FireStashOptions = { ...DEFAULT_OPTIONS };
+  throttledSnapshotCallbacks: Map<string, ThrottledSnapshot> = new Map();
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -439,6 +446,80 @@ export default class FireStash extends EventEmitter {
     }
     this.modified.clear();
     this.eventsTimer = null;
+  }
+
+  async onThrottledSnapshot(
+    documentPath: string,
+    callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
+    timeout = 1000,
+  ): Promise<() => void> {
+    return new Promise((resolve, reject) => {
+      let timeoutWindowStart = Date.now();
+      let callsThisTimeout = 0;
+      let numNoChangeTimeouts = 0;
+      let lastUpdateTime = 0;
+
+      const handleSnapshot = async(snapshot: FirebaseFirestore.DocumentSnapshot) => {
+        const throttledSnapshot = this.throttledSnapshotCallbacks.get(documentPath);
+        if (!throttledSnapshot) return;
+        const intervalId: NodeJS.Timeout | null = throttledSnapshot.intervalId || null;
+        const onSnapshotListener = throttledSnapshot.onSnapshotUnsubscribe;
+
+        const now = Date.now();
+        const updateTime = snapshot.updateTime?.toMillis() || 0;
+        const changed = updateTime !== lastUpdateTime;
+        lastUpdateTime = updateTime;
+
+        if (onSnapshotListener) {
+          if (now - timeoutWindowStart >= timeout) {
+            timeoutWindowStart = now;
+            callsThisTimeout = 0;
+          }
+          else callsThisTimeout += 1;
+          if (callsThisTimeout >= 3) {
+            // Cancel the snapshot listener.
+            onSnapshotListener();
+            throttledSnapshot.onSnapshotUnsubscribe = null;
+            callsThisTimeout = 0;
+            // Switch to polling.
+            throttledSnapshot.intervalId = setInterval(() => this.db.doc(documentPath).get().then(handleSnapshot, reject), timeout);
+          }
+        }
+        else {
+          if (!changed) ++numNoChangeTimeouts;
+          if (numNoChangeTimeouts >= 3) {
+            // Cancel the interval.
+            intervalId && clearInterval(intervalId);
+            throttledSnapshot.intervalId = null;
+            numNoChangeTimeouts = 0;
+            throttledSnapshot.onSnapshotUnsubscribe = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
+          }
+        }
+
+        this.throttledSnapshotCallbacks.get(documentPath)?.callbacks.forEach(cb => cb(snapshot));
+      };
+
+      const callbacks = this.throttledSnapshotCallbacks.get(documentPath)?.callbacks || new Set();
+      callbacks.add(callback);
+      const throttledSnapshot = {
+        callbacks,
+        onSnapshotUnsubscribe: this.throttledSnapshotCallbacks.get(documentPath)?.onSnapshotUnsubscribe || this.db.doc(documentPath).onSnapshot(handleSnapshot, reject),
+        intervalId: null,
+      };
+      this.throttledSnapshotCallbacks.set(documentPath, throttledSnapshot);
+
+      resolve(() => {
+        const throttledSnapshot = this.throttledSnapshotCallbacks.get(documentPath);
+        if (throttledSnapshot) {
+          throttledSnapshot.callbacks.delete(callback);
+          if (throttledSnapshot.callbacks.size === 0) {
+            throttledSnapshot.onSnapshotUnsubscribe && throttledSnapshot.onSnapshotUnsubscribe();
+            throttledSnapshot.intervalId && clearInterval(throttledSnapshot.intervalId);
+            this.throttledSnapshotCallbacks.delete(documentPath);
+          }
+        }
+      });
+    });
   }
 
   /**

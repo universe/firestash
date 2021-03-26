@@ -531,5 +531,113 @@ describe('Connector', function() {
       await wait(5000);
       assert.strictEqual(called, 9, 'Listens for remote updates');
     });
+
+    it('uses throttled onSnapshot to listen to remote', async function() {
+      const path = 'foo/bar1';
+      let called = 0;
+      await fireStash.onThrottledSnapshot(path, () => called++);
+
+      fireStash.db.doc(path).set({ foo: 'a' });
+      await wait(200);
+      fireStash.db.doc(path).set({ foo: 'b' });
+      await wait(1500);
+      assert.strictEqual(called, 3, 'Listens for remote updates');
+    });
+
+    it('if onSnapshot listener gets more than 3 updates in a timeout window, it falls back to polling', async function() {
+      const path = 'foo/bar2';
+      let called = 0;
+      await fireStash.onThrottledSnapshot(path, () => called++, 2000);
+
+      for (let i = 0; i <= 30; i++) {
+        await fireStash.db.doc(path).set({ foo: i });
+        await wait(50);
+      }
+      await wait(2500);
+      assert.strictEqual(called, 5, 'Num called after snapshot updates');
+    });
+
+    it('if onSnapshot listener gets more than 3 updates with no changes while polling, it returns to using onSnapshot', async function() {
+      const path = 'foo/bar3';
+      let called = 0;
+      await fireStash.onThrottledSnapshot(path, () => called++);
+
+      for (let i = 0; i <= 5; i++) {
+        await fireStash.db.doc(path).set({ foo: i });
+        await wait(50);
+      }
+      await wait(850);
+
+      // Wait for polling updates...
+      await wait(3000);
+
+      // Back to listening for regular snapshots.
+      for (let i = 0; i <= 10; i++) { // 3 before polling, 1 after polling
+        await fireStash.db.doc(path).set({ foo: i });
+        await wait(100);
+      }
+      assert.strictEqual(called, 12, 'Final num calls');
+    });
+
+    it('throttled snapshot listener can handle multiple callbacks', async function() {
+      const path = 'foo/bar4';
+      const called = { a: 0, b: 0, c: 0 };
+      await fireStash.onThrottledSnapshot(path, () => called.a += 1);
+      await fireStash.onThrottledSnapshot(path, () => called.b += 1);
+      await fireStash.onThrottledSnapshot(path, () => called.c += 1);
+
+      await wait(100);
+      await fireStash.db.doc(path).set({ foo: 1 });
+      await wait(100);
+      await fireStash.db.doc(path).set({ foo: 2 });
+      await wait(100);
+
+      assert.deepStrictEqual(called, { a: 3, b: 3, c: 3 }, 'Final num called');
+    });
+
+    it('unsubscribe onSnapshot listener', async function() {
+      const called = { a: 0, b: 0 };
+      const path = 'foo/bar5';
+      const a = await fireStash.onThrottledSnapshot(path, () => called.a += 1);
+      const b = await fireStash.onThrottledSnapshot(path, () => called.b += 1);
+
+      await fireStash.db.doc(path).set({ foo: 1 });
+      await wait(300);
+      assert.deepStrictEqual(called, { a: 2, b: 2 }, 'Num called after first change');
+
+      // Unsubscribe the first callback.
+      a();
+      await fireStash.db.doc(path).set({ foo: 2 });
+      await wait(700);
+      assert.deepStrictEqual(called, { a: 2, b: 3 }, 'Num called after unsubscribe');
+
+      // Resubscribe the first callback.
+      const c = await fireStash.onThrottledSnapshot(path, () => called.a += 1);
+      await wait(100);
+      await fireStash.db.doc(path).set({ foo: 3 });
+      assert.deepStrictEqual(called, { a: 3, b: 4 }, 'Num called after resubscribe');
+
+      await wait(1500);
+
+      // Make polling kick in....
+      for (let i = 0; i <= 40; i++) {
+        await fireStash.db.doc(path).set({ foo: i });
+        await wait(20);
+      }
+      await wait(100);
+      assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Num called after polling kicks in');
+
+      // Unsubscribe both.
+      b(); c();
+      await fireStash.db.doc(path).set({ foo: 4 });
+      await wait(200);
+      assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Num after  both unsubscribed');
+
+      // Verify that unsubscribe clears intervals as well.
+      await fireStash.db.doc(path).set({ foo: 5 });
+      await fireStash.db.doc(path).set({ foo: 6 });
+      await wait(3000);
+      assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Final num called');
+    });
   });
 });
