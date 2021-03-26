@@ -633,7 +633,9 @@ describe('Connector', function() {
       await wait(200);
       assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Num after  both unsubscribed');
 
-      // Verify that unsubscribe clears polling as well.
+      // Verify that unsubscribe clears intervals as well.
+      await fireStash.db.doc(path).set({ foo: 5 });
+      await fireStash.db.doc(path).set({ foo: 6 });
       await wait(3000);
       assert.deepStrictEqual(called, { a: 8, b: 9 }, 'Final num called');
     });
