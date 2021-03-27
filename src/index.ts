@@ -3,7 +3,6 @@ import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { clearInterval, clearTimeout } from 'timers';
 import levelup, { LevelUp } from 'levelup';
 import leveldown from 'leveldown';
 import memdown from 'memdown';
@@ -25,9 +24,13 @@ declare global {
 }
 
 interface ThrottledSnapshot {
+  updatedAt: number;
+  timeout: number;
   callbacks: Set<(snapshot: FirebaseFirestore.DocumentSnapshot) => void>;
-  onSnapshotUnsubscribe: (() => void) | null;
+  releaseSnapshot: (() => void) | null;
   intervalId: NodeJS.Timeout | null;
+  data: FirebaseFirestore.DocumentSnapshot | null;
+  count: number;
 }
 
 /* eslint-disable-next-line */
@@ -98,7 +101,7 @@ export default class FireStash extends EventEmitter {
   timeoutPromise: Promise<void> = Promise.resolve();
   level: LevelUp;
   options: FireStashOptions = { ...DEFAULT_OPTIONS };
-  throttledSnapshotCallbacks: Map<string, ThrottledSnapshot> = new Map();
+  documentListeners: Map<string, ThrottledSnapshot> = new Map();
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -448,77 +451,97 @@ export default class FireStash extends EventEmitter {
     this.eventsTimer = null;
   }
 
+  private async handleSnapshot(documentPath: string, snapshot: FirebaseFirestore.DocumentSnapshot) {
+    const listener = this.documentListeners.get(documentPath);
+    if (!listener) return;
+
+    const now = Date.now();
+    const changed = !listener.data || (snapshot.updateTime?.toMillis() || 0) !== (listener.data?.updateTime?.toMillis() || 0);
+    if (listener.releaseSnapshot) {
+      // If our update is outside of our timeout windows, keep the subscription going.
+      if (listener.timeout <= now - listener.updatedAt) {
+        listener.count = 0;
+        listener.updatedAt = now;
+      }
+
+      // If we've exceeded the number of updates within the timeout, switch to polling.
+      if (changed && ++listener.count >= 3) {
+        listener.releaseSnapshot();
+        listener.releaseSnapshot = null;
+        listener.count = 0;
+        listener.intervalId = setInterval(() => this.db.doc(documentPath).get().then(this.handleSnapshot.bind(this, documentPath)), listener.timeout);
+      }
+
+      // Call all callbacks regardless as long as something has changed.
+      changed && listener.callbacks.forEach(cb => cb(snapshot));
+    }
+    else {
+      // If we have an detect a change withing the polling interval, reset count and call the callbacks.
+      if (changed) {
+        listener.count = 0;
+        listener.callbacks.forEach(cb => cb(snapshot));
+      }
+
+      // If we have had no changed updates for at least 3x the polling window, fall back to the passive watcher.
+      else if (++listener.count >= 3) {
+        listener.count = 0;
+        listener.intervalId && clearTimeout(listener.intervalId);
+        listener.intervalId = null;
+        listener.releaseSnapshot = this.db.doc(documentPath).onSnapshot(this.handleSnapshot.bind(this, documentPath));
+      }
+    }
+
+    // Initial document reads don't count against quota.
+    !listener.data && (listener.count = 0);
+
+    // Update our listener with latest info.
+    listener.data = snapshot;
+  };
+
+  // Removes the watcher callback, and if there are no callbacks left, unsubscribes the watchers.
+  private unsubscribeSnapshot(documentPath: string, callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void) {
+    const listener = this.documentListeners.get(documentPath);
+    listener?.callbacks.delete(callback);
+    if (listener?.callbacks.size === 0) {
+      listener.releaseSnapshot && listener.releaseSnapshot();
+      listener.intervalId && clearTimeout(listener.intervalId);
+      this.documentListeners.delete(documentPath);
+    }
+  }
+
   async onThrottledSnapshot(
     documentPath: string,
     callback: (snapshot: FirebaseFirestore.DocumentSnapshot) => void,
     timeout = 1000,
   ): Promise<() => void> {
     return new Promise((resolve, reject) => {
-      let timeoutWindowStart = Date.now();
-      let callsThisTimeout = 0;
-      let numNoChangeTimeouts = 0;
-      let lastUpdateTime = 0;
+      const unsubscribe = this.unsubscribeSnapshot.bind(this, documentPath, callback);
 
-      const handleSnapshot = async(snapshot: FirebaseFirestore.DocumentSnapshot) => {
-        const throttledSnapshot = this.throttledSnapshotCallbacks.get(documentPath);
-        if (!throttledSnapshot) return;
-        const intervalId: NodeJS.Timeout | null = throttledSnapshot.intervalId || null;
-        const onSnapshotListener = throttledSnapshot.onSnapshotUnsubscribe;
-
-        const now = Date.now();
-        const updateTime = snapshot.updateTime?.toMillis() || 0;
-        const changed = updateTime !== lastUpdateTime;
-        lastUpdateTime = updateTime;
-
-        if (onSnapshotListener) {
-          if (now - timeoutWindowStart >= timeout) {
-            timeoutWindowStart = now;
-            callsThisTimeout = 0;
-          }
-          else callsThisTimeout += 1;
-          if (callsThisTimeout >= 3) {
-            // Cancel the snapshot listener.
-            onSnapshotListener();
-            throttledSnapshot.onSnapshotUnsubscribe = null;
-            callsThisTimeout = 0;
-            // Switch to polling.
-            throttledSnapshot.intervalId = setInterval(() => this.db.doc(documentPath).get().then(handleSnapshot, reject), timeout);
-          }
-        }
-        else {
-          if (!changed) ++numNoChangeTimeouts;
-          if (numNoChangeTimeouts >= 3) {
-            // Cancel the interval.
-            intervalId && clearInterval(intervalId);
-            throttledSnapshot.intervalId = null;
-            numNoChangeTimeouts = 0;
-            throttledSnapshot.onSnapshotUnsubscribe = this.db.doc(documentPath).onSnapshot(handleSnapshot, reject);
-          }
-        }
-
-        this.throttledSnapshotCallbacks.get(documentPath)?.callbacks.forEach(cb => cb(snapshot));
-      };
-
-      const callbacks = this.throttledSnapshotCallbacks.get(documentPath)?.callbacks || new Set();
-      callbacks.add(callback);
-      const throttledSnapshot = {
-        callbacks,
-        onSnapshotUnsubscribe: this.throttledSnapshotCallbacks.get(documentPath)?.onSnapshotUnsubscribe || this.db.doc(documentPath).onSnapshot(handleSnapshot, reject),
+      // Get existing listener object if exists, otherwise create a new listener object and start watching the document.
+      const listener = this.documentListeners.get(documentPath) || {
+        updatedAt: Date.now(),
+        timeout,
+        callbacks: new Set(),
+        releaseSnapshot: this.db.doc(documentPath).onSnapshot(d => this.handleSnapshot(documentPath, d).then(() => resolve(unsubscribe)), reject),
         intervalId: null,
+        data: null,
+        count: 0,
       };
-      this.throttledSnapshotCallbacks.set(documentPath, throttledSnapshot);
 
-      resolve(() => {
-        const throttledSnapshot = this.throttledSnapshotCallbacks.get(documentPath);
-        if (throttledSnapshot) {
-          throttledSnapshot.callbacks.delete(callback);
-          if (throttledSnapshot.callbacks.size === 0) {
-            throttledSnapshot.onSnapshotUnsubscribe && throttledSnapshot.onSnapshotUnsubscribe();
-            throttledSnapshot.intervalId && clearInterval(throttledSnapshot.intervalId);
-            this.throttledSnapshotCallbacks.delete(documentPath);
-          }
-        }
-      });
+      // Ensure our listener is in the hash.
+      this.documentListeners.set(documentPath, listener);
+
+      // Add our callback to the list.
+      listener.callbacks.add(callback);
+
+      // If we're still waiting for initialization, we're done.
+      if (!listener.data) { return; }
+
+      // If already initialized, call this specific callback with our latest data.
+      callback(listener.data);
+
+      // Resolve with the unsubscribe function.
+      resolve(unsubscribe);
     });
   }
 
