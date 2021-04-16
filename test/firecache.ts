@@ -127,6 +127,46 @@ describe('Connector', function() {
       assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary after remote update.');
     });
 
+    it('is able to delete an object', async function() {
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' } }, 'Gets all data');
+      fireStash.delete('contacts', '1');
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 2 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts'), {}, 'Gets all data');
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), null, 'Missing objects return null.');
+      assert.deepStrictEqual((await app.firestore().doc('contacts/1').get()).data(), undefined);
+    });
+
+    it('is able to delete then reify an object', async function() {
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' } }, 'Gets all data');
+      fireStash.delete('contacts', '1');
+      fireStash.update('contacts', '1', { foo: 'baz' });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 2 } }, 'Stash correctly set');
+      assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'baz' } }, 'Gets all data');
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), { foo: 'baz' }, 'Missing objects return null.');
+      assert.deepStrictEqual((await app.firestore().doc('contacts/1').get()).data(), { foo: 'baz' });
+    });
+
+    it('is able to watch an object for deletion', async function() {
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      await fireStash.allSettled();
+      fireStash.watch('contacts');
+      const cacheKey = fireStash.cacheKey('contacts', 0);
+      const cache = (await fireStash.db.collection('firestash').doc(cacheKey).get()).data() as Record<string, number>;
+      cache.cache['1'] = (cache.cache['1'] || 0) + 1;
+      await fireStash.db.doc('contacts/1').delete();
+      await fireStash.db.collection('firestash').doc(cacheKey).set(cache);
+      await wait(1000);
+      assert.deepStrictEqual(await fireStash.get('contacts', '1'), null, 'Missing objects return null.');
+    });
+
     it('one update with no content will force sync with remote', async function() {
       const fetches: string[] = [];
       let objUpdates = 0;
@@ -515,7 +555,7 @@ describe('Connector', function() {
       let called = 0;
       const cacheKey = fireStash.cacheKey('contacts', 0);
       await fireStash.update('contacts', 'id1');
-      fireStash.on('contacts', () => ++called && console.log(Date.now()));
+      fireStash.on('contacts', () => ++called);
       await fireStash.watch('contacts');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
       const cache = (await fireStash.db.collection('firestash').doc(cacheKey).get()).data();
