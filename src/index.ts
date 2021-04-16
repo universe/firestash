@@ -23,6 +23,8 @@ declare global {
   }
 }
 
+const DELETE_RECORD = Symbol('firestash-delete');
+
 interface ThrottledSnapshot {
   updatedAt: number;
   timeout: number;
@@ -90,7 +92,7 @@ const DEFAULT_OPTIONS: FireStashOptions = {
 };
 
 export default class FireStash extends EventEmitter {
-  toUpdate: Map<string, Map<string, (object | null)[]>> = new Map();
+  toUpdate: Map<string, Map<string, (object | typeof DELETE_RECORD | null)[]>> = new Map();
   firebase: typeof Firebase;
   app: Firebase.app.App;
   db: Firebase.firestore.Firestore;
@@ -295,7 +297,11 @@ export default class FireStash extends EventEmitter {
 
           // For each object we've been asked to update (run at least once even if no object was presented)...
           for (const obj of objects.length ? objects : [null]) {
-            if (obj) {
+            if (obj === DELETE_RECORD) {
+              batch.delete(this.db.doc(`${collection}/${key}`));
+              count += 1; // +1 for object delete
+            }
+            else if (obj) {
               ensureFirebaseSafe(obj, FieldValue);
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
               count += 1; // +1 for object merge
@@ -592,7 +598,7 @@ export default class FireStash extends EventEmitter {
         }
 
         lastUpdate = now;
-        firstCall && (firstCall = resolve());
+        firstCall && (firstCall = resolve(() => this.unwatch(collection)));
       };
 
       liveWatcher = query.onSnapshot(handleSnapshot, reject);
@@ -718,7 +724,7 @@ export default class FireStash extends EventEmitter {
         }
       }
       else {
-        await new Promise((resolve) => {
+        await new Promise<void>((resolve) => {
           const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
           stream.on('data', (dat) => {
             const record = dat.value || '{}';
@@ -784,7 +790,7 @@ export default class FireStash extends EventEmitter {
     return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }
 
-  private localEvents: Map<string, Map<string, Set<object> | null>> = new Map();
+  private localEvents: Map<string, Map<string, Set<object | typeof DELETE_RECORD> | null>> = new Map();
   private drainEventsTimer: NodeJS.Immediate | null = null;
   public drainEventsPromise: Promise<void> = Promise.resolve();
   private async drainEvents() {
@@ -793,13 +799,13 @@ export default class FireStash extends EventEmitter {
       for (const [ key, updates ] of records) {
         const id = `${collection}/${key}`;
         if (collection && key && updates?.size) {
-          let localObj: (object & InternalStash) = await this.safeGet(collection, key) || {};
+          let localObj: (object & InternalStash) | null = await this.safeGet(collection, key) || null;
           for (const obj of updates) {
-            localObj && (localObj = deepMerge(localObj, obj, { arrayMerge: overwriteMerge }));
+            localObj = obj === DELETE_RECORD ? null : deepMerge(localObj || {}, obj, { arrayMerge: overwriteMerge });
           }
-          delete localObj.__dirty__;
+          localObj && (delete localObj.__dirty__);
           const val = JSON.stringify(localObj);
-          await this.level.put(id, val);
+          (localObj === null) ? await this.level.del(id) : await this.level.put(id, val);
           this.documentMemo[id] = JSON.parse(val);
         }
         this.emit(id, collection, [key]);
@@ -834,6 +840,35 @@ export default class FireStash extends EventEmitter {
       if (!this.drainEventsTimer && !this.options.lowMem) {
         this.drainEventsTimer = setImmediate(() => this.drainEventsPromise = this.drainEvents());
       }
+    }
+
+    // Ensure we're ready to trigger a remote update on next cycle.
+    return this.timeoutPromise = this.timeout ? this.timeoutPromise : new Promise((resolve, reject) => {
+      this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
+    });
+  }
+
+  /**
+   * Increment a single document's generation cache key. Syncs to remote once per second.
+   * @param collection Collection Path
+   */
+  async delete(collection: string, key: string) {
+    // Queue update for next remote data sync (1 per second)
+    const keys = this.toUpdate.get(collection) || new Map();
+    this.toUpdate.set(collection, keys);
+    const updates = keys.get(key) || [];
+    keys.set(key, updates);
+    updates.push(DELETE_RECORD);
+
+    // If we were provided an object, queue it for local update on next tick.
+    const collectionMap = this.localEvents.get(collection) || new Map();
+    this.localEvents.set(collection, collectionMap);
+    const objSet = collectionMap.get(key) || new Set();
+    collectionMap.set(key, objSet);
+    objSet.add(DELETE_RECORD);
+    // Ensure we're ready to trigger events on next tick.
+    if (!this.drainEventsTimer && !this.options.lowMem) {
+      this.drainEventsTimer = setImmediate(() => this.drainEventsPromise = this.drainEvents());
     }
 
     // Ensure we're ready to trigger a remote update on next cycle.
