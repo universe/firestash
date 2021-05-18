@@ -130,6 +130,11 @@ export default class FireStash extends EventEmitter {
     else {
       this.level = levelup(memdown());
     }
+
+    // Set Immediate is better to use than the default nextTick for newer versions of Node.js.
+    // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
+    // @ts-ignore
+    this.level._nextTick = setImmediate;
   }
 
   cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
@@ -701,65 +706,90 @@ export default class FireStash extends EventEmitter {
   async get<T=object>(collection: string, id: string[]): Promise<Record<string, T | null>>;
   async get<T=object>(collection: string, id?: string | string[]): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
-    const ids = new Set((id ? Array.isArray(id) ? id : [id] : []));
+    const idArr = id ? (Array.isArray(id) ? id : [id]) : [] as string[];
+    const ids = new Set(idArr.map(id => `${collection}/${id}`));
+    const toGet: string[] = [...ids];
     const memoKey = `${collection}${id ? `/${[...ids].join(',')}` : ''}`;
 
+    // If request is memoized, return the cached request. Prevents multiple quick requests from blowing out the cache.
     if (this.getRequestsMemo.has(memoKey)) {
       return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
     }
+
     this.getRequestsMemo.set(memoKey, (async() => {
       const out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
       if (ids.size > 0 && ids.size <= 30) {
-        for (const id of ids) {
+        for (const id of idArr) {
           const record = await this.safeGet<T & InternalStash>(collection, id);
           if (record && !record.__dirty__ && !this.options.lowMem) { out[id] = record; }
           else { modified.add(id); }
         }
       }
       else if (this.options.lowMem) {
-        const ids = id ? (Array.isArray(id) ? id : [id]) : Object.keys((await this.stash(collection)).cache);
+        const ids = id ? idArr : Object.keys((await this.stash(collection)).cache);
         for (const id of ids) {
           modified.add(id);
         }
       }
       else {
-        await new Promise<void>((resolve) => {
-          const stream = this.level.createReadStream({ gt: collection, keyAsBuffer: false, valueAsBuffer: false });
-          stream.on('data', (dat) => {
-            const record = dat.value || '{}';
-
-            const id = dat.key.toString('utf8') as string;
-
-            // If the key doesn't start with the collection name, we're done!
-            if (!id.startsWith(collection)) {
-              /* eslint-disable-next-line */
-              // @ts-ignore
-              stream.destroy();
-              resolve();
-              return;
-            }
-
-            // Get the document key relative to this collection.
-            const key = id.replace(collection + '/', '');
-
-            // If is not in the provided ID set, is the collection itself, or a sub-collection, skip.
-            if ((ids.size && !ids.has(key)) || id === collection || key.includes('/')) { return; }
-
-            // If dirty, queue for fetch, otherwise add to our JSON return.
-            if (record && !record.includes('__dirty__') && !this.options.lowMem) {
-              try {
-                out[key] = JSON.parse(record);
+        // Slightly faster to request the keys as strings instead of buffers.
+        const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
+        const collectionPrefix = `${collection}/`;
+        const sliceIdx = collectionPrefix.length;
+        if (!toGet.length) {
+          await new Promise<void>((resolve, reject) => {
+            const process = (err?: Error | null, id?: string) => {
+              // If the key doesn't start with the collection name, we're done!
+              if (err || id === undefined || id.slice(0, sliceIdx) !== collectionPrefix) {
+                return iterator.end(() => err ? reject(err) : resolve());
               }
-              catch (err) {
-                this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`);
+
+              // Queue up the next request!
+              iterator.next(process);
+
+              // If is in the provided ID set, is not the collection itself, queue a get for this key
+              if ((!ids.size || ids.has(id)) && id !== collection) {
+                toGet.push(id);
               }
-            }
-            else { modified.add(key); }
+            };
+            iterator.next(process);
           });
-          stream.on('error', () => resolve());
-          stream.on('close', () => resolve());
-          stream.on('end', () => resolve());
+        }
+
+        await new Promise<void>((resolve) => {
+          let done = 0;
+          for (const id of toGet) {
+            // Get the document key relative to this collection.
+            const key = id.slice(sliceIdx);
+
+            // If this is a sub-collection item, continue.
+            if (key.indexOf('/') !== -1) {
+              if (++done === toGet.length) { resolve(); }
+              continue;
+            }
+
+            this.level.get(id, { asBuffer: false }, (err, record) => {
+              // If dirty, queue for fetch, otherwise add to our JSON return.
+              if (!err && record && !this.options.lowMem) {
+                try {
+                  // Faster than one big parse at end.
+                  out[key] = JSON.parse(record);
+                  if ((out[key] as unknown as Record<string, boolean>).__dirty__) {
+                    modified.add(key);
+                  }
+                }
+                catch (err) {
+                  this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`);
+                  modified.add(key);
+                }
+              }
+              else {
+                modified.add(key);
+              }
+              if (++done === toGet.length) { resolve(); }
+            });
+          }
         });
       }
 

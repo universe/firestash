@@ -3,6 +3,7 @@ import { assert } from 'chai';
 import * as path from 'path';
 import * as fireTest from '@firebase/testing';
 import Firebase from 'firebase-admin';
+import { performance } from 'perf_hooks';
 
 import FireStash from '../src';
 
@@ -333,6 +334,35 @@ describe('Connector', function() {
       page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
       page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
       assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
+    });
+
+    it('large streaming gets are performant', async function() {
+      this.timeout(30000);
+
+      const promises: Promise<void>[] = [];
+      const bigString = 'x'.repeat(30 * 1024);
+      const ids: string[] = [];
+      for (let i = 0; i < 15000; i++) {
+        ids.push(`id${i}`);
+        promises.push(fireStash.update('bulkcollection', `id${i}`, { id: bigString }));
+      }
+
+      await Promise.allSettled(promises);
+      await fireStash.allSettled();
+
+      let now = performance.now();
+      const res = await fireStash.get('bulkcollection');
+      let done = performance.now();
+      // console.log(now, done, done - now);
+      assert.strictEqual(Object.keys(res).length, 15000, 'Fetches all values');
+      assert.ok(done - now < 1500, 'Get time is now blown out.');
+
+      now = performance.now();
+      const res2 = await fireStash.get('bulkcollection', ids);
+      done = performance.now();
+      // console.log(now, done, done - now);
+      assert.strictEqual(Object.keys(res2).length, 15000, 'Fetches all values');
+      assert.ok(done - now < 1300, 'Get time is now blown out.');
     });
 
     it('massive operations run in low memory mode', async function() {

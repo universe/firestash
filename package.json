@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "main": "dist/src/index.js",
   "license": "MIT",
   "private": false,
@@ -12,7 +12,7 @@
     "test": "firebase emulators:exec 'yarn mocha'",
     "lint": "eslint **/*.ts",
     "lint:fix": "eslint **/*.ts --fix",
-    "mocha": "mocha -r dotenv/config dist/test --inspect",
+    "mocha": "mocha -r dotenv/config dist/test --inspect=9222",
     "deploy": "NODE_ENV=production firebase deploy",
     "emulate": "firebase emulators:start --only firestore"
   },
