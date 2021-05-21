@@ -336,6 +336,12 @@ describe('Connector', function() {
       assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
     });
 
+    it.only('handles empty collection requests', async function() {
+      this.timeout(500);
+      const res = await fireStash.get('missingcollection');
+      assert.strictEqual(Object.keys(res).length, 0, 'Fetches all values');
+    });
+
     it('large streaming gets are performant', async function() {
       this.timeout(30000);
 

@@ -759,6 +759,7 @@ export default class FireStash extends EventEmitter {
 
         await new Promise<void>((resolve) => {
           let done = 0;
+          if (toGet.length === 0) { resolve(); }
           for (const id of toGet) {
             // Get the document key relative to this collection.
             const key = id.slice(sliceIdx);
