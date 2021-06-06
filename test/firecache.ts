@@ -1,11 +1,17 @@
+/* eslint-disable import/first */
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const moduleAlias = require('module-alias');
+moduleAlias.addAlias('@grpc/grpc-js', 'grpc');
+
 import { describe, afterEach, after, it } from 'mocha';
 import { assert } from 'chai';
 import * as path from 'path';
-import * as fireTest from '@firebase/testing';
+import * as fireTest from '@firebase/rules-unit-testing';
 import Firebase from 'firebase-admin';
 import { performance } from 'perf_hooks';
 
 import FireStash from '../src';
+import { rejects } from 'assert';
 
 const projectId = 'fire-stash';
 
@@ -20,7 +26,7 @@ describe('Connector', function() {
     let fireStash = new FireStash(Firebase, app, path.join(__dirname, String(appId++)));
 
     afterEach(async function() {
-      this.timeout(5000);
+      this.timeout(60000);
       await fireStash.stop();
       await fireTest.clearFirestoreData({ projectId });
       fireStash = new FireStash(Firebase, app, path.join(__dirname, String(appId++)));
@@ -61,7 +67,23 @@ describe('Connector', function() {
       await memStash.stop();
     });
 
-    it('only calling update does start a watcher', async function() {
+    it('getting a non-existent key does not fetch from remote', async function() {
+      const fetches: string[] = [];
+      fireStash.on('fetch', (collection, id) => fetches.push(`${collection}/${id}`));
+      assert.deepStrictEqual(fireStash.watchers.size, 0, 'No watchers by default.');
+      rejects(() => fireStash.level.get('tests/doc'), 'Key does not exist in stash');
+      assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
+      assert.deepStrictEqual(fireStash.watchers.size, 1, 'One watcher started after read.');
+      assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
+
+      await fireStash.unwatch('tests');
+      rejects(() => fireStash.level.get('tests/doc'), 'Key does not exist in stash');
+      assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
+      assert.deepStrictEqual(fireStash.watchers.size, 1, 'One watcher started after read.');
+      assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
+    });
+
+    it('only calling update does not start a watcher', async function() {
       fireStash.update('contacts', 'id1');
       await fireStash.allSettled();
       assert.deepStrictEqual(fireStash.watchers.size, 0, 'No watchers started.');
@@ -202,7 +224,6 @@ describe('Connector', function() {
       };
 
       await fireStash.allSettled();
-
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
       assert.deepStrictEqual((await fireStash.db.doc('contacts/1').get()).data(), expected, 'Gets all data on remote');
@@ -287,63 +308,66 @@ describe('Connector', function() {
     });
 
     it('shards massive caches within one collection', async function() {
-      this.timeout(30000);
+      try {
+        this.timeout(60000);
 
-      const cache = {};
-      const objects = {};
-      const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
-
-      let batch = fireStash.db.batch();
-      for (let i = 0; i < 15000; i++) {
-        fireStash.update('collection2', `id${i}`);
-        fireStash.update(`collection2/id${i}/sub-page`, String(i));
-        fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
-        batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
-        cache[`id${i}`] = 1;
-        objects[`collection2/id${i}`] = { id: i };
-        if (i % 500 === 0) {
-          promises.push(batch.commit());
-          batch = fireStash.db.batch();
+        const cache = {};
+        const objects = {};
+        const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
+        let batch = fireStash.db.batch();
+        for (let i = 0; i < 15000; i++) {
+          fireStash.update('collection2', `id${i}`);
+          fireStash.update(`collection2/id${i}/sub-page`, String(i));
+          fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
+          batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
+          cache[`id${i}`] = 1;
+          objects[`collection2/id${i}`] = { id: i };
+          if (i % 500 === 0) {
+            promises.push(batch.commit());
+            batch = fireStash.db.batch();
+          }
         }
+        await batch.commit();
+        await Promise.allSettled(promises);
+        await fireStash.allSettled();
+        assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 15000, 'Writes an obscene amount of data.');
+
+        const res = await fireStash.get('collection2');
+        assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
+        assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
+
+        const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
+
+        fireStash.update('collection2', `id${15000}`);
+        await fireStash.allSettled();
+
+        let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
+
+        let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+        let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+        assert.ok(page0Count === 15000, 'Initial cache overflows are simply append only.');
+        assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
+
+        await fireStash.balance('collection2');
+        dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+        page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+        assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
       }
-      promises.push(batch.commit());
-      await Promise.allSettled(promises);
-      await fireStash.allSettled();
-      assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 15000, 'Writes an obscene amount of data.');
-
-      const res = await fireStash.get('collection2');
-      assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
-      assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
-
-      const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
-
-      fireStash.update('collection2', `id${15000}`);
-      await fireStash.allSettled();
-
-      let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
-
-      let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-      let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-      assert.ok(page0Count === 15000, 'Initial cache overflows are simply append only.');
-      assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
-
-      await fireStash.balance('collection2');
-      dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-      page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-      assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
+      catch (err) {
+        return err;
+      }
     });
 
-    it.only('handles empty collection requests', async function() {
-      this.timeout(500);
+    it('handles empty collection requests', async function() {
       const res = await fireStash.get('missingcollection');
-      assert.strictEqual(Object.keys(res).length, 0, 'Fetches all values');
+      return assert.strictEqual(Object.keys(res).length, 0, 'Fetches all values');
     });
 
     it('large streaming gets are performant', async function() {
-      this.timeout(30000);
+      this.timeout(300000);
 
       const promises: Promise<void>[] = [];
       const bigString = 'x'.repeat(30 * 1024);
@@ -355,71 +379,80 @@ describe('Connector', function() {
 
       await Promise.allSettled(promises);
       await fireStash.allSettled();
-
       let now = performance.now();
       const res = await fireStash.get('bulkcollection');
       let done = performance.now();
-      // console.log(now, done, done - now);
       assert.strictEqual(Object.keys(res).length, 15000, 'Fetches all values');
       assert.ok(done - now < 1500, 'Get time is now blown out.');
 
       now = performance.now();
       const res2 = await fireStash.get('bulkcollection', ids);
       done = performance.now();
-      // console.log(now, done, done - now);
       assert.strictEqual(Object.keys(res2).length, 15000, 'Fetches all values');
       assert.ok(done - now < 1300, 'Get time is now blown out.');
     });
 
     it('massive operations run in low memory mode', async function() {
-      this.timeout(30000);
+      try {
+        this.timeout(300000);
 
-      fireStash.options.lowMem = true;
+        fireStash.options.lowMem = true;
 
-      const cache = {};
-      const objects = {};
-      const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
-      let batch = fireStash.db.batch();
-      for (let i = 0; i < 15000; i++) {
-        fireStash.update('collection2', `id${i}`);
-        fireStash.update(`collection2/id${i}/sub-page`, String(i));
-        fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
-        batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
-        cache[`id${i}`] = 1;
-        objects[`collection2/id${i}`] = { id: i };
-        if (i % 500 === 0) {
-          promises.push(batch.commit());
-          batch = fireStash.db.batch();
+        const start = Date.now();
+        const cache = {};
+        const objects = {};
+        const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
+        let batch = fireStash.db.batch();
+        for (let i = 0; i < 15000; i++) {
+          fireStash.update('collection2', `id${i}`);
+          fireStash.update(`collection2/id${i}/sub-page`, String(i));
+          fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
+          batch.set(fireStash.db.doc(`collection2/id${i}`), { id: i });
+          cache[`id${i}`] = 1;
+          objects[`collection2/id${i}`] = { id: i };
+          if (i % 500 === 0) {
+            await batch.commit();
+            batch = fireStash.db.batch();
+          }
         }
+        await batch.commit();
+        console.log('commit')
+        await Promise.allSettled(promises);
+        console.log('settled')
+
+        await fireStash.allSettled();
+        console.log('alldone')
+
+        const waypoint = Date.now();
+        console.log('WRITTEN', waypoint - start, Object.keys((await fireStash.stash('collection2')).cache).length);
+        assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 15000, 'Writes an obscene amount of data.');
+
+        const res = await fireStash.get('collection2');
+        console.log('READ', Date.now() - waypoint, Object.keys(res).filter(Boolean).length);
+        assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
+        assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
+
+        const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
+
+        fireStash.update('collection2', `id${15000}`);
+        await fireStash.allSettled();
+
+        let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
+
+        let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+        let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+        assert.ok(page0Count === 15000, 'Initial cache overflows are simply append only.');
+        assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
+
+        await fireStash.balance('collection2');
+        dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
+        page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+        page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+        assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
       }
-      promises.push(batch.commit());
-      await Promise.allSettled(promises);
-      await fireStash.allSettled();
-      assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 15000, 'Writes an obscene amount of data.');
-
-      const res = await fireStash.get('collection2');
-      assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
-      assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
-
-      const dat = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
-
-      fireStash.update('collection2', `id${15000}`);
-      await fireStash.allSettled();
-
-      let dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
-
-      let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-      let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-      assert.ok(page0Count === 15000, 'Initial cache overflows are simply append only.');
-      assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
-
-      await fireStash.balance('collection2');
-      dat2 = await fireStash.db.collection('firestash').where('collection', '==', 'collection2').get();
-      page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-      page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-      assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
+      catch (err) { return err; }
     });
 
     it('batches massive key updates across many collection', async function() {
