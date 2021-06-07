@@ -23,6 +23,10 @@ declare global {
   }
 }
 
+// Maximum payload size for Firestore is 11,534,336 bytes (11.5MB).
+// Maximum document size is 1MB. Worst case: 10 documents are safe to send at a tie.
+const MAX_BATCH_SIZE = 10;
+const MAX_READ_SIZE = 500;
 const DELETE_RECORD = Symbol('firestash-delete');
 
 interface ThrottledSnapshot {
@@ -294,7 +298,6 @@ export default class FireStash extends EventEmitter {
           // Update remote object.
           const update: IFireStash<FirebaseFirestore.FieldValue> = updates[pageName] = updates[pageName] || { collection, cache: {} };
           update.cache[key] = FieldValue.increment(1);
-          count += 1; // +1 for increment call.
 
           // Keep our local stash in sync to prevent unnessicary object syncs down the line.
           const page = localStash[pageName] = localStash[pageName] || { collection, cache: {} };
@@ -324,8 +327,8 @@ export default class FireStash extends EventEmitter {
               events.set(collection, keys);
             }
 
-            // If we've hit the 500 write limit, batch write these objects.
-            if (count >= 498) {
+            // If we've hit the batch write limit, batch write these objects.
+            if (count >= MAX_BATCH_SIZE) {
               for (const pageName of Object.keys(updates)) {
                 batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
               }
@@ -648,7 +651,7 @@ export default class FireStash extends EventEmitter {
     // Fetch all our updated documents.
     const start = Date.now();
     const documents: FirebaseFirestore.DocumentSnapshot<T>[] = [];
-    let requestPageSize = 500;
+    let requestPageSize = MAX_READ_SIZE;
     let missCount = 0;
     // Retry getAll fetches at least three times. getAll in firebase is unreliable.
     // You'll get most of the object very quickly, but some may take a second request.
@@ -1032,7 +1035,7 @@ export default class FireStash extends EventEmitter {
         delete page.cache[key];
 
         changeCount += 2;
-        if (changeCount >= (498 - (pageCount * 2))) {
+        if (changeCount >= (MAX_BATCH_SIZE - (pageCount * 2))) {
           const batch = this.db.batch();
           for (const [ id, page ] of Object.entries(updates)) {
             batch.set(this.db.collection('firestash').doc(id), page, { merge: true });

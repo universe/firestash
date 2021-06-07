@@ -293,17 +293,17 @@ describe('Connector', function() {
       let i = 0;
       fireStash.on('save', () => { i++; });
 
-      // Contrived to show that we batch document updates in groups of 500, including collection names – the limit for Firestore.batch().
+      // Contrived to show that we batch document updates in groups of 10, including collection names – the worst case size limit for Firestore.batch().
       const cache = {};
       for (let i = 0; i < 1000; i++) {
-        fireStash.update('collection', `id${i}`);
+        fireStash.update('collection', `id${i}`, { i });
         cache[`id${i}`] = 1;
       }
 
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache: {} }, 'Throttles cache writes');
-      assert.strictEqual(i, 0, 'Throttles large multi-collection writes in batches of 500');
+      assert.strictEqual(i, 0, 'Throttles large multi-collection writes in batches of 10');
       await fireStash.allSettled();
-      assert.strictEqual(i, 3, 'Throttles large multi-collection writes in batches of 500');
+      assert.strictEqual(i, 112, 'Throttles large multi-collection writes in batches of 10'); // Batches of 10, plus cache page updates.
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache }, 'Throttles cache writes');
     });
 
@@ -416,12 +416,12 @@ describe('Connector', function() {
           }
         }
         await batch.commit();
-        console.log('commit')
+        console.log('commit');
         await Promise.allSettled(promises);
-        console.log('settled')
+        console.log('settled');
 
         await fireStash.allSettled();
-        console.log('alldone')
+        console.log('alldone');
 
         const waypoint = Date.now();
         console.log('WRITTEN', waypoint - start, Object.keys((await fireStash.stash('collection2')).cache).length);
@@ -461,16 +461,15 @@ describe('Connector', function() {
 
       // Contrived to show that we batch document updates in groups of 500 – the limit for Firestore.batch().
       for (let i = 0; i < 1000; i++) {
-        fireStash.update(`collection${i}`, `id${i}`);
+        fireStash.update(`collection${i}`, `id${i}`, { i });
       }
 
       assert.deepStrictEqual(await fireStash.stash('collection0'), { collection: 'collection0', cache: {} }, 'Throttles cache writes');
       assert.deepStrictEqual(await fireStash.stash('collection999'), { collection: 'collection999', cache: {} }, 'Throttles cache writes');
-      assert.strictEqual(saveCount, 0, 'Throttles large multi-collection writes in batches of 500, which include collection names');
+      assert.strictEqual(saveCount, 0, 'Throttles large multi-collection writes in batches of 10, which include collection names');
 
       await fireStash.allSettled();
-
-      assert.strictEqual(saveCount, 5, 'Throttles large multi-collection writes in batches of 500');
+      assert.strictEqual(saveCount, 201, 'Throttles large multi-collection writes in batches of 10');
       assert.deepStrictEqual(await fireStash.stash('collection0'), { collection: 'collection0', cache: { id0: 1 } }, 'Throttles cache writes');
       assert.deepStrictEqual(await fireStash.stash('collection999'), { collection: 'collection999', cache: { id999: 1 } }, 'Throttles cache writes');
     });
