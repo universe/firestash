@@ -26,6 +26,7 @@ declare global {
 // Maximum payload size for Firestore is 11,534,336 bytes (11.5MB).
 // Maximum document size is 1MB. Worst case: 10 documents are safe to send at a tie.
 const MAX_BATCH_SIZE = 10;
+const MAX_UPDATE_SIZE = 475;
 const MAX_READ_SIZE = 500;
 const DELETE_RECORD = Symbol('firestash-delete');
 
@@ -197,7 +198,8 @@ export default class FireStash extends EventEmitter {
     const FieldValue = this.firebase.firestore.FieldValue;
     /* eslint-disable-next-line */
     const promises: Promise<any>[] = [];
-    let count = 0;
+    let docCount = 0;
+    let updateCount = 0;
     let updates = {};
     let batch = this.db.batch();
     const localBatch = this.level.batch();
@@ -293,11 +295,12 @@ export default class FireStash extends EventEmitter {
           const pageName = cacheKey(collection, pageIdx);
 
           // If this page does not exist in our update yet, add one extra write to our count for ensuring the collection name.
-          if (!updates[pageName]) { count++; }
+          if (!updates[pageName]) { docCount++; }
 
           // Update remote object.
           const update: IFireStash<FirebaseFirestore.FieldValue> = updates[pageName] = updates[pageName] || { collection, cache: {} };
           update.cache[key] = FieldValue.increment(1);
+          updateCount += 1;
 
           // Keep our local stash in sync to prevent unnessicary object syncs down the line.
           const page = localStash[pageName] = localStash[pageName] || { collection, cache: {} };
@@ -307,12 +310,12 @@ export default class FireStash extends EventEmitter {
           for (const obj of objects.length ? objects : [null]) {
             if (obj === DELETE_RECORD) {
               batch.delete(this.db.doc(`${collection}/${key}`));
-              count += 1; // +1 for object delete
+              docCount += 1; // +1 for object delete
             }
             else if (obj) {
               ensureFirebaseSafe(obj, FieldValue);
               batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
-              count += 1; // +1 for object merge
+              docCount += 1; // +1 for object merge
             }
             else {
               if (!this.options.lowMem) {
@@ -328,14 +331,15 @@ export default class FireStash extends EventEmitter {
             }
 
             // If we've hit the batch write limit, batch write these objects.
-            if (count >= MAX_BATCH_SIZE) {
+            if (docCount >= MAX_BATCH_SIZE || updateCount >= MAX_UPDATE_SIZE) {
               for (const pageName of Object.keys(updates)) {
                 batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
               }
               await batch.commit();
               this.emit('save');
               updates = {};
-              count = 0;
+              docCount = 0;
+              updateCount = 0;
               batch = this.db.batch();
             }
           }
@@ -1019,7 +1023,8 @@ export default class FireStash extends EventEmitter {
       remote[pageName] = remote[pageName] || { collection, cache: {} };
     }
 
-    let changeCount = 0;
+    let docCount = 0;
+    let updateCount = 0;
     for (const [ id, dat ] of Object.entries(remote)) {
       if (!dat) { continue; }
       for (const [ key, value ] of Object.entries(dat.cache)) {
@@ -1030,19 +1035,21 @@ export default class FireStash extends EventEmitter {
 
         updates[pageId].cache[key] = value;
         page.cache[key] = value;
+        updateCount += 1;
 
         updates[id].cache[key] = FieldValue.delete();
         delete page.cache[key];
 
-        changeCount += 2;
-        if (changeCount >= (MAX_BATCH_SIZE - (pageCount * 2))) {
+        docCount += 2;
+        if (docCount >= (MAX_BATCH_SIZE - (pageCount * 2)) || updateCount >= MAX_UPDATE_SIZE) {
           const batch = this.db.batch();
           for (const [ id, page ] of Object.entries(updates)) {
             batch.set(this.db.collection('firestash').doc(id), page, { merge: true });
             updates[id] = { collection, cache: {} };
           }
           await batch.commit();
-          changeCount = 0;
+          docCount = 0;
+          updateCount = 0;
         }
       }
     }

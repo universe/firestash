@@ -392,6 +392,18 @@ describe('Connector', function() {
       assert.ok(done - now < 1300, 'Get time is now blown out.');
     });
 
+    it('cache-only updates are batched in groups of 475', async function() {
+      this.timeout(30000);
+      let saveCount = 0;
+      fireStash.on('save', () => { saveCount++; });
+
+      for (let i = 0; i < 951; i++) {
+        fireStash.update('collection2', `id${i}`);
+      }
+      await fireStash.allSettled();
+      assert.strictEqual(saveCount, 3);
+    });
+
     it('massive operations run in low memory mode', async function() {
       try {
         this.timeout(300000);
