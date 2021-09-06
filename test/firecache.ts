@@ -1,8 +1,3 @@
-/* eslint-disable import/first */
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const moduleAlias = require('module-alias');
-moduleAlias.addAlias('@grpc/grpc-js', 'grpc');
-
 import { describe, afterEach, after, it } from 'mocha';
 import { assert } from 'chai';
 import * as path from 'path';
@@ -108,6 +103,31 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' }, 2: { biz: 'baz' } }, 'Gets all data');
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
+    });
+
+    it('fetches only happen once', async function() {
+      const fetches: string[] = [];
+      let called = 0;
+      fireStash.update('contacts', '1', { foo: 'bar' });
+      fireStash.db.doc('contacts/2').set({ biz: 'baz' });
+      fireStash.update('contacts', '2');
+      await fireStash.allSettled();
+
+      const otherFireStash = new FireStash(Firebase, app, path.join(__dirname, String(appId + '-other')));
+      otherFireStash.on('fetch', (collection, id) => {
+        fetches.push(`${collection}/${id}`);
+        called++;
+      });
+      await otherFireStash.watch('contacts');
+      assert.deepStrictEqual(await otherFireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
+      for (let i = 0; i < 10; i++) {
+        // Intentional no await, testing request throttling.
+        otherFireStash.get('contacts');
+      }
+      assert.deepStrictEqual(await otherFireStash.get('contacts'), { 1: { foo: 'bar' }, 2: { biz: 'baz' } }, 'Gets all data');
+      await otherFireStash.allSettled();
+      assert.deepStrictEqual(called, 2, 'Only called once per doc');
+      assert.deepStrictEqual(fetches.sort(), [ 'contacts/1', 'contacts/2' ].sort(), 'Fetches only what is necessary');
     });
 
     it('is able to update a key set to undefined', async function() {

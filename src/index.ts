@@ -3,10 +3,16 @@ import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import levelup, { LevelUp } from 'levelup';
-import leveldown from 'leveldown';
-import memdown from 'memdown';
+import * as LevelUp from 'levelup';
+import * as LevelDown from 'leveldown';
+import * as RocksDb from 'rocksdb';
+import * as MemDown from 'memdown';
 import * as deepMerge from 'deepmerge';
+
+const levelup = LevelUp as unknown as typeof LevelUp.default;
+const leveldown = LevelDown as unknown as typeof LevelDown.default;
+const memdown = MemDown as unknown as typeof MemDown.default;
+const rocksdb = RocksDb as unknown as typeof RocksDb.default;
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -87,11 +93,15 @@ export interface IFireStash<T = number> {
 // }
 
 export interface FireStashOptions {
+  datastore: 'rocksdb' | 'leveldown' | 'memdown';
+  readOnly: boolean;
   lowMem: boolean;
   directory: string | null;
 }
 
 const DEFAULT_OPTIONS: FireStashOptions = {
+  datastore: 'leveldown',
+  readOnly: false,
   lowMem: false,
   directory: null,
 };
@@ -106,7 +116,7 @@ export default class FireStash extends EventEmitter {
   watchers: Map<string, () => void> = new Map();
   timeout: NodeJS.Timeout | null = null;
   timeoutPromise: Promise<void> = Promise.resolve();
-  level: LevelUp;
+  level: LevelUp.LevelUp;
   options: FireStashOptions = { ...DEFAULT_OPTIONS };
   documentListeners: Map<string, ThrottledSnapshot> = new Map();
 
@@ -128,7 +138,11 @@ export default class FireStash extends EventEmitter {
       Object.assign(this.options, directory);
     }
 
-    if (this.dir) {
+    if (this.options.datastore === 'rocksdb' && this.dir) {
+      fs.mkdirSync(this.dir, { recursive: true });
+      this.level = levelup(rocksdb(path.join(this.dir, '.firestash.rocks')), { readOnly: this.options.readOnly });
+    }
+    else if (this.options.datastore === 'leveldown' && this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
     }
