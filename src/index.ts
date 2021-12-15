@@ -20,7 +20,7 @@ export default class FireStash extends AbstractFireStash {
 
   constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
     super(project, options);
-    this.#worker = fork(path.join(__dirname, './worker.js'), [ JSON.stringify(project), JSON.stringify(options) ]);
+    this.#worker = fork(path.join(__dirname, './worker.js'), [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ]);
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') { this.#tasks[id][0](res); }
       else if (type === 'event') { this.emit(id, ...res); }
@@ -30,6 +30,8 @@ export default class FireStash extends AbstractFireStash {
         else { this.#iterators[id][0](res || null); }
       }
     });
+
+    // Start our own firebase connection for in-process access.
     const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
     this.firebase = Firebase;
     this.app = Firebase.initializeApp(creds, `${creds.projectId}-firestash-${nanoid()}`);
@@ -40,6 +42,9 @@ export default class FireStash extends AbstractFireStash {
 
     // Ensure we dont leave zombies around.
     process.on('exit', () => this.#worker.kill());
+    process.on('SIGHUP', () => this.#worker.kill());
+    process.on('SIGINT', () => this.#worker.kill());
+    process.on('SIGTERM', () => this.#worker.kill());
   }
 
   private async runInWorker<M extends Exclude<keyof IFireStash, 'db' | 'app'>>(message: [M, Parameters<IFireStash[M]>] | ['unsubscribe', [number]]): Promise<Awaited<ReturnType<IFireStash[M]>>> {

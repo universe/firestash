@@ -1,6 +1,6 @@
 import FireStash, { IFireStash, FireStashOptions, ServiceAccount } from './lib';
 
-const [ credential, options ]: [ ServiceAccount, FireStashOptions ] = [ JSON.parse(process.argv[2]), JSON.parse(process.argv[3]) ];
+const [ credential, options, parentPid ]: [ ServiceAccount, FireStashOptions, number ] = [ JSON.parse(process.argv[2]), JSON.parse(process.argv[3]), parseInt(process.argv[4]) ];
 
 class WorkerFireStash extends FireStash {
   emit(type: string | symbol, ...args: any[]): boolean {
@@ -10,12 +10,16 @@ class WorkerFireStash extends FireStash {
   }
 }
 
-const firestash = new WorkerFireStash(credential, options);
+// If the parent process dies and we become a zombie, shut ourselves down.
+setInterval(() => {
+  try { process.kill(parentPid, 0); }
+  catch { process.exit(); }
+}, 1000 * 10);
 
+const firestash = new WorkerFireStash(credential, options);
 const CALLBACK_METHODS = { watch: 1, onSnapshot: 1 };
 const unsubscribeCallbacks: Record<number, () => any> = {};
 const STREAMS: Record<number, AsyncIterableIterator<any>> = {};
-
 process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' | 'app'>>([ id, [ method, args ]]: [number, [ M, Parameters<IFireStash[M]>] | ['unsubscribe', []]]) {
   if (method === 'unsubscribe') {
     unsubscribeCallbacks[id]?.();
