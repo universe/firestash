@@ -31,7 +31,7 @@
     "leveldown": "^6.0.1",
     "levelup": "^5.0.1",
     "memdown": "^6.0.0",
-    "nanoid": "^3.1.30",
+    "nanoid": "^3.1.31",
     "rocksdb": "^5.1.1"
   },
   "peerDependencies": {
