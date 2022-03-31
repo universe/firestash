@@ -207,8 +207,8 @@ export default class FireStash extends AbstractFireStash {
     const promises: Promise<any>[] = [];
     let docCount = 0;
     let updateCount = 0;
-    let updates = {};
-    let batch = this.db.batch();
+    let updates: Record<string, IFireStashPage<FirebaseFirestore.FieldValue>> = {};
+    let docUpdates: ['set' | 'delete', string, any][] = [];
     const localBatch = this.level.batch();
     const entries = [...this.toUpdate.entries()];
     const collectionStashes: Map<string, Record<string, IFireStashPage | undefined>> = new Map();
@@ -265,7 +265,7 @@ export default class FireStash extends AbstractFireStash {
         let documentCount = 0;
         for (const dat of Object.values(localStash)) {
           if (!dat) { continue; }
-          documentCount += Object.keys(dat.cache).length;
+          documentCount += Object.keys(dat.cache || {}).length;
         }
 
         // For each key queued, set the cache object.
@@ -317,12 +317,12 @@ export default class FireStash extends AbstractFireStash {
           // For each object we've been asked to update (run at least once even if no object was presented)...
           for (const obj of objects.length ? objects : [null]) {
             if (obj === DELETE_RECORD) {
-              batch.delete(this.db.doc(`${collection}/${key}`));
+              docUpdates.push(['delete', `${collection}/${key}`, null]);
               docCount += 1; // +1 for object delete
             }
             else if (obj) {
               ensureFirebaseSafe(obj, FieldValue);
-              batch.set(this.db.doc(`${collection}/${key}`), obj, { merge: true });
+              docUpdates.push(['set', `${collection}/${key}`, obj]);
               docCount += 1; // +1 for object merge
             }
             else {
@@ -342,12 +342,44 @@ export default class FireStash extends AbstractFireStash {
 
             // If we've hit the batch write limit, batch write these objects.
             if (docCount >= MAX_BATCH_SIZE || updateCount >= MAX_UPDATE_SIZE) {
+              let batch = this.db.batch();
+              for (const [type, key, value] of docUpdates) {
+                type === 'delete' && batch.delete(this.db.doc(key));
+                type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
+              }
               for (const pageName of Object.keys(updates)) {
                 batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
               }
-              await batch.commit();
+              try {
+                await batch.commit();
+              } catch (err) {
+                if (err.details?.startsWith('maximum entity size') || err.code === 3) {
+                  console.error('Cache Overflow');
+                  let batch = this.db.batch();
+                  for (const [type, key, value] of docUpdates) {
+                    type === 'delete' && batch.delete(this.db.doc(key));
+                    type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
+                  }
+                  await batch.commit();
+                  for (const [pageId, update] of Object.entries(updates)) {
+                    try {
+                      await this.db.collection('firestash').doc(pageId).set(update, { merge: true })
+                    } catch {
+                      console.error('Cache Overflow', pageId);
+                      const localStash = collectionStashes.get(update.collection) || {};
+                      const newPage = cacheKey(update.collection, Object.keys(localStash).length);
+                      await this.db.collection('firestash').doc(newPage).set(update, { merge: true })
+                    }
+                  }
+                }
+                else {
+                  console.error(err);
+                }
+              }
+
               this.emit('save');
               updates = {};
+              docUpdates = [];
               docCount = 0;
               updateCount = 0;
               batch = this.db.batch();
@@ -370,10 +402,42 @@ export default class FireStash extends AbstractFireStash {
       }
 
       // Batch write the changes.
+      let batch = this.db.batch();
+      for (const [type, key, value] of docUpdates) {
+        type === 'delete' && batch.delete(this.db.doc(key));
+        type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
+      }
       for (const pageName of Object.keys(updates)) {
         batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
       }
-      await batch.commit();
+
+      try {
+        await batch.commit();
+      } catch (err) {
+        if (err.details?.startsWith('maximum entity size') || err.code === 3) {
+          console.error('Cache Overflow');
+          let batch = this.db.batch();
+          for (const [type, key, value] of docUpdates) {
+            type === 'delete' && batch.delete(this.db.doc(key));
+            type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
+          }
+          await batch.commit();
+          for (const [pageId, update] of Object.entries(updates)) {
+            try {
+              await this.db.collection('firestash').doc(pageId).set(update, { merge: true })
+            } catch {
+              console.error('Cache Overflow', pageId);
+              const localStash = collectionStashes.get(update.collection) || {};
+              const newPage = cacheKey(update.collection, Object.keys(localStash).length);
+              await this.db.collection('firestash').doc(newPage).set(update, { merge: true })
+            }
+          }
+        }
+        else {
+          console.error(err);
+        }
+      }
+
       this.emit('save');
 
       // Save our local stash
@@ -806,7 +870,9 @@ export default class FireStash extends AbstractFireStash {
               if (isDirty(record)) {
                 modified.add(key);
               }
-              yield [ key, reify<T>(record) ];
+              else {
+                yield [ key, reify<T>(record) ];
+              }
             }
             catch (err) {
               this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
@@ -1164,7 +1230,7 @@ export default class FireStash extends AbstractFireStash {
     let recordCount = 0;
     for (const dat of Object.values(remote)) {
       if (!dat) { continue; }
-      recordCount += Object.keys(dat.cache).length;
+      recordCount += Object.keys(dat.cache || {}).length;
     }
     const pageCount = Math.ceil(recordCount / pageSize());
     const updates: Record<string, IFireStashPage<FirebaseFirestore.FieldValue | number>> = {};
