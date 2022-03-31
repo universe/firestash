@@ -329,6 +329,7 @@ describe('Connector', function() {
     });
 
     it('batches large key updates within one collection', async function() {
+      this.timeout(10000);
       let i = 0;
       fireStash.on('save', () => { i++; });
 
@@ -340,9 +341,13 @@ describe('Connector', function() {
       }
 
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache: {} }, 'Throttles cache writes');
+
       assert.strictEqual(i, 0, 'Throttles large multi-collection writes in batches of 10');
+
       await fireStash.allSettled();
-      assert.strictEqual(i, 112, 'Throttles large multi-collection writes in batches of 10'); // Batches of 10, plus cache page updates.
+
+      assert.strictEqual(i, 101, 'Throttles large multi-collection writes in batches of 10'); // Batches of 10, plus cache page updates.
+
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache }, 'Throttles cache writes');
     });
 
@@ -447,12 +452,12 @@ describe('Connector', function() {
       assert.ok(done - now < 3000, 'Get time is not blown out.');
     });
 
-    it('cache-only updates are batched in groups of 475', async function() {
+    it('cache-only updates are batched in groups of 490', async function() {
       this.timeout(30000);
       let saveCount = 0;
       fireStash.on('save', () => { saveCount++; });
 
-      for (let i = 0; i < 951; i++) {
+      for (let i = 0; i < (490 * 2) + 1; i++) {
         fireStash.update('collection2', `id${i}`);
       }
       await fireStash.allSettled();
@@ -524,7 +529,7 @@ describe('Connector', function() {
     });
 
     it('batches massive key updates across many collection', async function() {
-      this.timeout(4000);
+      this.timeout(8000);
       let saveCount = 0;
       fireStash.on('save', () => { saveCount++; });
 
@@ -612,6 +617,24 @@ describe('Connector', function() {
       process.env.FIRESTASH_PAGINATION = undefined;
     });
 
+    it('listens to remote', async function() {
+      this.timeout(80000);
+      await fireStash.watch('remote-listen-contacts');
+      for (let i = 0; i < 10; i++) {
+        await Promise.all([
+          fireStash.update('remote-listen-contacts', 'id1'),
+          fireStash.update('remote-listen-contacts', 'id2'),
+        ]);
+        await fireStash.allSettled();
+        console.log(await fireStash.stash('remote-listen-contacts'));
+      }
+      console.log(await fireStash.stash('remote-listen-contacts'));
+      assert.deepStrictEqual(await fireStash.stash('remote-listen-contacts'), {
+        collection: 'remote-listen-contacts',
+        cache: { id1: 10, id2: 10 },
+      }, 'Throttles cache write and writes');
+    });
+
     it('pagination update tests with deep collections', async function() {
       this.timeout(3000);
       process.env.FIRESTASH_PAGINATION = 10;
@@ -670,7 +693,7 @@ describe('Connector', function() {
     });
 
     it('throttles listener when updates exceed one per second', async function() {
-      this.timeout(6000);
+      this.timeout(10000);
       let called = 0;
       const cacheKey = fireStash.cacheKey('contacts', 0);
       await fireStash.update('contacts', 'id1');
@@ -692,7 +715,7 @@ describe('Connector', function() {
     });
 
     it('throttles listener when updates exceed a consistent one per second and updates', async function() {
-      this.timeout(6000);
+      this.timeout(10000);
       let called = 0;
       const cacheKey = fireStash.cacheKey('contacts', 0);
       await fireStash.update('contacts', 'id1');
@@ -708,9 +731,8 @@ describe('Connector', function() {
         await firestore.collection('firestash').doc(cacheKey).set(cache, { merge: true });
         await wait(200);
       }
-
-      await wait(5000);
-      assert.strictEqual(called, 9, 'Listens for remote updates');
+      await fireStash.allSettled();
+      assert.strictEqual(called, 8, 'Listens for remote updates');
     });
 
     it('uses throttled onSnapshot to listen to remote', async function() {
@@ -759,6 +781,32 @@ describe('Connector', function() {
 
       assert.deepStrictEqual(Object.values((await firestore.doc(`firestash/${cacheKey('overflow', 0)}`).get()).data()?.cache), [ 1, 1 ]);
       assert.deepStrictEqual(Object.values((await firestore.doc(`firestash/${cacheKey('overflow', 1)}`).get()).data()?.cache), [1]);
+    });
+
+    it('small remote updates', async function() {
+      this.timeout(60000);
+      fireStash.update('remote-changes', '1', { id: 0 });
+      await fireStash.allSettled();
+      fireStash.stop();
+      await firestore.doc('remote-changes/1').set({ id: 1 });
+      await firestore.doc(`firestash/${cacheKey('remote-changes', 0)}`).set({ collection: 'remote-changes', cache: { 1: 1 } });
+      fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId)) });
+      const data = await fireStash.get('remote-changes', ['1']);
+      assert.deepStrictEqual(data, { 1: { id: 1 } });
+    });
+
+    it('large remote updates', async function() {
+      this.timeout(60000);
+      const ids = [];
+      const expected = {};
+      for (let i = 0; i < 50; i++) {
+        await firestore.doc(`remote-changes/${i}`).set({ id: i });
+        await firestore.doc(`firestash/${cacheKey('remote-changes', 0)}`).set({ collection: 'remote-changes', cache: { [i]: i } }, { merge: true });
+        ids.push(`${i}`);
+        expected[i] = { id: i };
+      }
+      const data = await fireStash.get('remote-changes', ids);
+      assert.deepStrictEqual(data, expected);
     });
     // it('onThrottledSnapshot called when no document present', async function() {
     //   let called = 0;

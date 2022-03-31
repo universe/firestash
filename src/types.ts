@@ -53,7 +53,6 @@ declare interface AbstractFireStash {
 }
 
 abstract class AbstractFireStash extends EventEmitter implements IFireStash {
-
   protected project: ServiceAccount | string | null;
   protected options: FireStashOptions = { ...DEFAULT_OPTIONS };
 

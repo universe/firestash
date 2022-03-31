@@ -36,7 +36,7 @@ declare global {
 // Maximum payload size for Firestore is 11,534,336 bytes (11.5MB).
 // Maximum document size is 1MB. Worst case: 10 documents are safe to send at a time.
 const MAX_BATCH_SIZE = 10;
-const MAX_UPDATE_SIZE = 475;
+const MAX_UPDATE_SIZE = 490;
 const MAX_READ_SIZE = 500;
 const DELETE_RECORD = Symbol('firestash-delete');
 
@@ -142,7 +142,7 @@ export default class FireStash extends AbstractFireStash {
     }
 
     // Set Immediate is better to use than the default nextTick for newer versions of Node.js.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore
     this.level._nextTick = setImmediate;
   }
@@ -207,7 +207,7 @@ export default class FireStash extends AbstractFireStash {
     const promises: Promise<any>[] = [];
     let docCount = 0;
     let updateCount = 0;
-    let updates: Record<string, IFireStashPage<FirebaseFirestore.FieldValue>> = {};
+    const updates: Record<string, IFireStashPage<FirebaseFirestore.FieldValue>> = {};
     let docUpdates: ['set' | 'delete', string, any][] = [];
     const localBatch = this.level.batch();
     const entries = [...this.toUpdate.entries()];
@@ -317,12 +317,12 @@ export default class FireStash extends AbstractFireStash {
           // For each object we've been asked to update (run at least once even if no object was presented)...
           for (const obj of objects.length ? objects : [null]) {
             if (obj === DELETE_RECORD) {
-              docUpdates.push(['delete', `${collection}/${key}`, null]);
+              docUpdates.push([ 'delete', `${collection}/${key}`, null ]);
               docCount += 1; // +1 for object delete
             }
             else if (obj) {
               ensureFirebaseSafe(obj, FieldValue);
-              docUpdates.push(['set', `${collection}/${key}`, obj]);
+              docUpdates.push([ 'set', `${collection}/${key}`, obj ]);
               docCount += 1; // +1 for object merge
             }
             else {
@@ -343,42 +343,32 @@ export default class FireStash extends AbstractFireStash {
             // If we've hit the batch write limit, batch write these objects.
             if (docCount >= MAX_BATCH_SIZE || updateCount >= MAX_UPDATE_SIZE) {
               let batch = this.db.batch();
-              for (const [type, key, value] of docUpdates) {
+              for (const [ type, key, value ] of docUpdates) {
                 type === 'delete' && batch.delete(this.db.doc(key));
                 type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
               }
-              for (const pageName of Object.keys(updates)) {
-                batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
-              }
               try {
                 await batch.commit();
-              } catch (err) {
-                if (err.details?.startsWith('maximum entity size') || err.code === 3) {
-                  console.error('Cache Overflow');
-                  let batch = this.db.batch();
-                  for (const [type, key, value] of docUpdates) {
+              }
+              catch (err) {
+                if (err.details?.startsWith('maximum entity size')) {
+                  this.log.error('Content Document Too Large');
+                  const batch = this.db.batch();
+                  for (const [ type, key, value ] of docUpdates) {
                     type === 'delete' && batch.delete(this.db.doc(key));
                     type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
                   }
                   await batch.commit();
-                  for (const [pageId, update] of Object.entries(updates)) {
-                    try {
-                      await this.db.collection('firestash').doc(pageId).set(update, { merge: true })
-                    } catch {
-                      console.error('Cache Overflow', pageId);
-                      const localStash = collectionStashes.get(update.collection) || {};
-                      const newPage = cacheKey(update.collection, Object.keys(localStash).length);
-                      await this.db.collection('firestash').doc(newPage).set(update, { merge: true })
-                    }
-                  }
+                }
+                else if (err.details === 'cannot have more than 500 field transforms on a single document') {
+                  this.log.error('Excess Content Transforms Detected');
                 }
                 else {
-                  console.error(err);
+                  this.log.error(err);
                 }
               }
 
               this.emit('save');
-              updates = {};
               docUpdates = [];
               docCount = 0;
               updateCount = 0;
@@ -403,40 +393,80 @@ export default class FireStash extends AbstractFireStash {
 
       // Batch write the changes.
       let batch = this.db.batch();
-      for (const [type, key, value] of docUpdates) {
+      for (const [ type, key, value ] of docUpdates) {
         type === 'delete' && batch.delete(this.db.doc(key));
         type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
-      }
-      for (const pageName of Object.keys(updates)) {
-        batch.set(this.db.collection('firestash').doc(pageName), updates[pageName], { merge: true });
       }
 
       try {
         await batch.commit();
-      } catch (err) {
-        if (err.details?.startsWith('maximum entity size') || err.code === 3) {
-          console.error('Cache Overflow');
-          let batch = this.db.batch();
-          for (const [type, key, value] of docUpdates) {
+      }
+      catch (err) {
+        if (err.details?.startsWith('maximum entity size')) {
+          this.log.error('Content Document Too Large');
+          const batch = this.db.batch();
+          for (const [ type, key, value ] of docUpdates) {
             type === 'delete' && batch.delete(this.db.doc(key));
             type === 'set' && batch.set(this.db.doc(key), value, { merge: true });
           }
           await batch.commit();
-          for (const [pageId, update] of Object.entries(updates)) {
-            try {
-              await this.db.collection('firestash').doc(pageId).set(update, { merge: true })
-            } catch {
-              console.error('Cache Overflow', pageId);
-              const localStash = collectionStashes.get(update.collection) || {};
-              const newPage = cacheKey(update.collection, Object.keys(localStash).length);
-              await this.db.collection('firestash').doc(newPage).set(update, { merge: true })
-            }
-          }
+        }
+        else if (err.details === 'cannot have more than 500 field transforms on a single document') {
+          this.log.error('Excess Content Transforms Detected');
         }
         else {
-          console.error(err);
+          this.log.error(err);
         }
       }
+
+      type UpdatePage = Record<string, IFireStashPage<FirebaseFirestore.FieldValue | number>>;
+      const commitPage = async(db: FirebaseFirestore.Firestore, batch: FirebaseFirestore.WriteBatch, updates: UpdatePage) => {
+        try {
+          await batch.commit();
+        }
+        catch (err) {
+          if (err.details?.startsWith('maximum entity size')) {
+            this.log.error('Cache Object Data Overflow Detected');
+            for (const [ pageId, update ] of Object.entries(updates)) {
+              try {
+                this.log.info(`Updating Cache Object ${pageId} With ${Object.keys(update.cache).length} Cache Keys`);
+                await db.collection('firestash').doc(pageId).set(update, { merge: true });
+              }
+              catch {
+                this.log.error(`Correcting Cache Object Data Overflow on ${pageId}`);
+                const localStash = collectionStashes.get(update.collection) || {};
+                const newPage = cacheKey(update.collection, Object.keys(localStash).length);
+                await db.collection('firestash').doc(newPage).set(update, { merge: true });
+              }
+            }
+          }
+          if (err.details === 'cannot have more than 500 field transforms on a single document') {
+            this.log.error('Excess Cache Key Transforms Detected');
+            this.log.log(updates);
+          }
+        }
+      };
+
+      let i = 0;
+      let batchUpdates: UpdatePage = {};
+      batch = this.db.batch();
+      for (const [ pageId, page ] of Object.entries(updates)) {
+        batchUpdates[pageId] = batchUpdates[pageId] || { collection: page.collection, cache: {} };
+        for (const [ key, value ] of Object.entries(page.cache)) {
+          i++;
+          batchUpdates[pageId].cache[key] = value;
+          if (i >= MAX_UPDATE_SIZE) {
+            batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+            await commitPage(this.db, batch, batchUpdates);
+            batchUpdates = {};
+            batchUpdates[pageId] = { collection: page.collection, cache: {} };
+            batch = this.db.batch();
+            i = 0;
+          }
+        }
+        batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+      }
+      await commitPage(this.db, batch, batchUpdates);
 
       this.emit('save');
 
@@ -590,7 +620,7 @@ export default class FireStash extends AbstractFireStash {
 
     // Update our listener with latest info.
     listener.data = snapshot;
-  };
+  }
 
   // Removes the watcher callback, and if there are no callbacks left, unsubscribes the watchers.
   private async unsubscribe(documentPath: string, callback: (snapshot: any) => void): Promise<void> {
@@ -632,7 +662,7 @@ export default class FireStash extends AbstractFireStash {
       if (!listener.data) { return; }
 
       // If already initialized, call this specific callback with our latest data.
-      // eslint-disable-next-line standard/no-callback-literal
+      // eslint-disable-next-line node/no-callback-literal
       callback((listener.data.data() as D));
 
       // Resolve with the unsubscribe function.
@@ -644,13 +674,16 @@ export default class FireStash extends AbstractFireStash {
    * Watch for updates from a collection stash.
    * @param collection Collection Path
    */
+  private watcherStarters: Record<string, Promise<() => void> | undefined> = {};
   async watch(collection: string): Promise<() => void> {
+    // If we call this function on repeat, make sure we wait for the first call to be resolve.
+    if (this.watcherStarters[collection]) { await this.watcherStarters[collection]; }
+
     // If we've already started the watcher, return.
     const pending = this.#watchers.get(collection);
     if (pending) { return pending; }
 
-    // Return new promise that resolves after initial snapshot is done.
-    return new Promise((resolve, reject) => {
+    const watch = (resolve: (stop: () => void) => void, reject: (err: Error) => void) => {
       let firstCall: boolean | void = true;
       let callsThisSecond = 0;
       let lastUpdate = 0;
@@ -685,12 +718,18 @@ export default class FireStash extends AbstractFireStash {
         }
 
         lastUpdate = now;
-        firstCall && (firstCall = resolve(() => this.unwatch(collection)));
+        if (firstCall) {
+          delete this.watcherStarters[collection];
+          firstCall = resolve(() => this.unwatch(collection));
+        }
       };
 
       liveWatcher = query.onSnapshot(handleSnapshot, reject);
       this.#watchers.set(collection, liveWatcher);
-    });
+    };
+
+    // Return new promise that resolves after initial snapshot is done.
+    return this.watcherStarters[collection] = new Promise<() => void>(watch);
   }
 
   /**
@@ -744,6 +783,7 @@ export default class FireStash extends AbstractFireStash {
       this.log.info(`[FireCache] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
       const promises: Promise<FirebaseFirestore.DocumentSnapshot<T>[]>[] = [];
       for (let i = 0; i < Math.ceil(ids.length / requestPageSize); i++) {
+        // this.log.info(`[FireCache] Fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
         const p = this.db.getAll(
           ...ids.slice(i * requestPageSize, (i + 1) * requestPageSize).map((id) => {
             this.emit('fetch', collection, id);
@@ -754,6 +794,7 @@ export default class FireStash extends AbstractFireStash {
         // Force get serialization since grpc can panic with too many open connections.
         try { await p; }
         catch { /* Rejection appropriately handled later. */ }
+        // this.log.info(`[FireCache] Done fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
       }
 
       const resolutions = await Promise.allSettled(promises);
@@ -792,10 +833,10 @@ export default class FireStash extends AbstractFireStash {
     const ids = new Set(idArr.map(id => `${collection}/${id}`));
     const toGet: string[] = [...ids];
     const modified: Set<string> = new Set();
-    const stash = await this.stash(collection);
 
     // Ensure we're getting the latest stash data for this collection.
     !this.options.lowMem && await this.watch(collection);
+    const stash = await this.stash(collection);
 
     if (this.options.lowMem) {
       const ids = id ? idArr : Object.keys(stash.cache);
@@ -938,10 +979,10 @@ export default class FireStash extends AbstractFireStash {
     this.getRequestsMemo.set(memoKey, (async() => {
       const out: Record<string, T | null> = {};
       const modified: Set<string> = new Set();
-      const stash = await this.stash(collection);
 
       // Ensure we're getting the latest stash data for this collection.
       !this.options.lowMem && await this.watch(collection);
+      const stash = await this.stash(collection);
 
       if (this.options.lowMem) {
         const ids = id ? idArr : Object.keys(stash.cache);

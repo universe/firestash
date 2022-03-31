@@ -10,8 +10,8 @@ type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
   #worker: ChildProcess;
   #messageId = 0;
-  #tasks: Record<number, [Function, Function]> = {};
-  #iterators: Record<number, [(res: { value: [string, any | null]; done: boolean }) => any, Function]> = {};
+  #tasks: Record<number, [(value: any) => void, (err: Error) => void]> = {};
+  #iterators: Record<number, [(res: { value: [string, any | null]; done: boolean }) => any, (val: any) => void]> = {};
   #listeners: Record<string, (snapshot?: unknown) => any> = {};
 
   app: Firebase.app.App;
@@ -47,8 +47,10 @@ export default class FireStash extends AbstractFireStash {
     process.on('SIGTERM', () => this.#worker.kill());
   }
 
-  private async runInWorker<M extends Exclude<keyof IFireStash, 'db' | 'app'>>(message: [M, Parameters<IFireStash[M]>] | ['unsubscribe', [number]]): Promise<Awaited<ReturnType<IFireStash[M]>>> {
-    return new Promise<Awaited<ReturnType<IFireStash[M]>>>((resolve, reject) => {
+  private async runInWorker<M extends Exclude<keyof IFireStash, 'db' | 'app'>>(
+    message: [M, Parameters<IFireStash[M]>] | ['unsubscribe', [number]],
+  ): Promise<Awaited<ReturnType<IFireStash[M]>>> {
+    return new Promise<Awaited<ReturnType<IFireStash[M]>>>((resolve: (value: Awaited<ReturnType<IFireStash[M]>>) => void, reject: (err: Error) => void) => {
       const id = this.#messageId++;
       this.#tasks[id] = [ resolve, reject ];
       if (message[0] === 'onSnapshot') {
