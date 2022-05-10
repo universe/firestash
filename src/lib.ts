@@ -683,52 +683,93 @@ export default class FireStash extends AbstractFireStash {
     const pending = this.#watchers.get(collection);
     if (pending) { return pending; }
 
-    const watch = (resolve: (stop: () => void) => void, reject: (err: Error) => void) => {
-      let callsThisSecond = 0;
-      let lastUpdate = 0;
-      let liveWatcher: (() => void) | null = null;
-      const query = this.db.collection('firestash').where('collection', '==', collection);
-      const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
-        const now = update.readTime?.toMillis() || 0;
-        const docs: FirebaseFirestore.DocumentSnapshot[] = update.docChanges().map(change => change.doc);
-        const changed = await this.mergeRemote(collection, docs);
+    let [ resolve, reject ]: [null | ((stop: () => void) => void), null | ((err: Error) => void)] = [ null, null ];
+    const toDeferrable = (res: (stop: () => void) => void, rej: (err: Error) => void) => { resolve = res; reject = rej; };
+    const localPromise = new Promise<() => void>(toDeferrable);
+    this.watcherStarters[collection] = localPromise;
 
-        if (liveWatcher) {
-          // Increment our callsThisSecond if called within a second of the last call, otherwise reset to zero.
-          (now - lastUpdate < 1000) ? (callsThisSecond += 1) : (callsThisSecond = 0);
-          if (callsThisSecond >= 3) {
-            liveWatcher();
-            liveWatcher = null;
-            callsThisSecond = 0;
-          }
+    let callsThisSecond = 0;
+    let lastUpdate = 0;
+    let liveWatcher: (() => void) | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    const query = this.db.collection('firestash').where('collection', '==', collection);
+    const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
+      const now = update.readTime?.toMillis() || 0;
+      const docs: FirebaseFirestore.DocumentSnapshot[] = update.docChanges().map(change => change.doc);
+      const changed = await this.mergeRemote(collection, docs);
+
+      if (liveWatcher) {
+        // Increment our callsThisSecond if called within a second of the last call, otherwise reset to zero.
+        (now - lastUpdate < 1000) ? (callsThisSecond += 1) : (callsThisSecond = 0);
+        if (callsThisSecond >= 3) {
+          liveWatcher();
+          liveWatcher = null;
+          callsThisSecond = 0;
         }
-
-        if (!liveWatcher) { // Intentionally not an else. Needs to run if set to null in above if statement.
-          (!changed) ? (callsThisSecond += 1) : (callsThisSecond = 0);
-          if (callsThisSecond >= 3) {
-            callsThisSecond = 0;
-            liveWatcher = query.onSnapshot(handleSnapshot, reject);
-            this.#watchers.set(collection, liveWatcher);
-          }
-          else {
-            const timeoutId = setTimeout(() => query.get().then(handleSnapshot, reject), 1000);
-            this.#watchers.set(collection, () => clearTimeout(timeoutId));
-          }
+        else {
+          this.#watchers.set(collection, liveWatcher);
         }
+      }
 
-        lastUpdate = now;
-        if (this.watcherStarters[collection]) {
+      if (!liveWatcher) { // Intentionally not an else. Needs to run if set to null in above if statement.
+        (!changed) ? (callsThisSecond += 1) : (callsThisSecond = 0);
+        if (callsThisSecond >= 3) {
+          callsThisSecond = 0;
+          liveWatcher = query.onSnapshot(handleSnapshot, reject || console.error);
+          this.#watchers.set(collection, liveWatcher);
+        }
+        else {
+          timeoutId = setTimeout(() => query.get().then(handleSnapshot, reject), 1000);
+          this.#watchers.set(collection, () => timeoutId && clearTimeout(timeoutId));
+        }
+      }
+
+      lastUpdate = now;
+      if (this.watcherStarters[collection]) {
+        // If successfully completed first run.
+        if (this.watcherStarters[collection] === localPromise) {
           delete this.watcherStarters[collection];
-          resolve(() => this.unwatch(collection));
+          resolve?.(() => this.unwatch(collection));
         }
-      };
 
-      liveWatcher = query.onSnapshot(handleSnapshot, reject);
-      this.#watchers.set(collection, liveWatcher);
+        // If timed out and we've started again, clear our own watchers.
+        else {
+          if (this.#watchers.get(collection) === liveWatcher) {
+            this.#watchers.delete(collection);
+          }
+          liveWatcher?.();
+          timeoutId && clearTimeout(timeoutId);
+        }
+      }
     };
 
+    liveWatcher = query.onSnapshot(handleSnapshot, (err) => {
+      if (this.watcherStarters[collection] && this.watcherStarters[collection] === localPromise) {
+        delete this.watcherStarters[collection];
+      }
+      if (this.#watchers.get(collection) === liveWatcher) {
+        this.#watchers.delete(collection);
+      }
+      liveWatcher?.();
+      timeoutId && clearTimeout(timeoutId);
+      reject?.(err);
+    });
+    this.#watchers.set(collection, liveWatcher);
+    setTimeout(() => {
+      if (this.watcherStarters[collection] && this.watcherStarters[collection] === localPromise) {
+        console.error(`[FireStash] Timeout: "${collection}" Collection Watch Snapshot Timed Out`);
+        if (this.#watchers.get(collection) === liveWatcher) {
+          this.#watchers.delete(collection);
+        }
+        liveWatcher?.();
+        timeoutId && clearTimeout(timeoutId);
+        delete this.watcherStarters[collection];
+        reject?.(new Error(`Timeout: "${collection}" Collection Watch Snapshot Timed Out`));
+      }
+    }, 10000);
+
     // Return new promise that resolves after initial snapshot is done.
-    return this.watcherStarters[collection] = new Promise<() => void>(watch);
+    return localPromise;
   }
 
   /**
