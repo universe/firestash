@@ -26,7 +26,7 @@ export default class FireStash extends AbstractFireStash {
       process.env.NODE_ENV !== 'production' ? { execArgv: ['--inspect=40894'] } : {},
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
-      if (type === 'method') { this.#tasks[id][0](res); }
+      if (type === 'method') { err ? this.#tasks[id][1](err) : this.#tasks[id][0](res); }
       else if (type === 'event') { this.emit(id, ...res); }
       else if (type === 'snapshot') { this.#listeners[id]?.(res); }
       else if (type === 'iterator') {

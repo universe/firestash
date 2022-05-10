@@ -27,9 +27,9 @@ process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' |
     return;
   }
   if (method === 'stream') {
-    /* eslint-disable prefer-spread */
-    const stream = STREAMS[id] = STREAMS[id] || firestash.stream.apply(firestash, args);
     try {
+      /* eslint-disable prefer-spread */
+      const stream = STREAMS[id] = STREAMS[id] || firestash.stream.apply(firestash, args);
       const value = await stream.next();
       process.send?.([ 'iterator', id, value ]);
     }
@@ -45,7 +45,8 @@ process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' |
   Promise.resolve()
     .then(() => firestash[method].apply(firestash, args))
     .then((res) => { method === 'onSnapshot' && (unsubscribeCallbacks[id] = res); return res; })
-    .then((res) => process.send?.([ 'method', id, CALLBACK_METHODS[method as string] ? undefined : res ]));
+    .then((res) => process.send?.([ 'method', id, CALLBACK_METHODS[method as string] ? undefined : res ]))
+    .catch((err) => process.send?.([ 'method', id, undefined, err ]));
 });
 
 process.on('exit', () => firestash.stop());
