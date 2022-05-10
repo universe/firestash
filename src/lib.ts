@@ -1132,7 +1132,10 @@ export default class FireStash extends AbstractFireStash {
 
       this.getRequestsMemo.delete(memoKey);
       return typeof id === 'string' ? (out[id] || null) : out;
-    })());
+    })().catch((err) => {
+      this.getRequestsMemo.delete(memoKey);
+      throw err;
+    }));
     return this.getRequestsMemo.get(memoKey) as Promise<Record<string, T | null> | T | null>;
   }
 
