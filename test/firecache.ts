@@ -617,24 +617,6 @@ describe('Connector', function() {
       process.env.FIRESTASH_PAGINATION = undefined;
     });
 
-    it('listens to remote', async function() {
-      this.timeout(80000);
-      await fireStash.watch('remote-listen-contacts');
-      for (let i = 0; i < 10; i++) {
-        await Promise.all([
-          fireStash.update('remote-listen-contacts', 'id1'),
-          fireStash.update('remote-listen-contacts', 'id2'),
-        ]);
-        await fireStash.allSettled();
-        console.log(await fireStash.stash('remote-listen-contacts'));
-      }
-      console.log(await fireStash.stash('remote-listen-contacts'));
-      assert.deepStrictEqual(await fireStash.stash('remote-listen-contacts'), {
-        collection: 'remote-listen-contacts',
-        cache: { id1: 10, id2: 10 },
-      }, 'Throttles cache write and writes');
-    });
-
     it('pagination update tests with deep collections', async function() {
       this.timeout(3000);
       process.env.FIRESTASH_PAGINATION = 10;

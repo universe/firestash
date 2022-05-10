@@ -674,7 +674,7 @@ export default class FireStash extends AbstractFireStash {
    * Watch for updates from a collection stash.
    * @param collection Collection Path
    */
-  private watcherStarters: Record<string, Promise<() => void> | undefined> = {};
+  private watcherStarters: Record<string, undefined | true | Promise<() => void> | undefined> = {};
   async watch(collection: string): Promise<() => void> {
     // If we call this function on repeat, make sure we wait for the first call to be resolve.
     if (this.watcherStarters[collection]) { await this.watcherStarters[collection]; }
@@ -684,7 +684,6 @@ export default class FireStash extends AbstractFireStash {
     if (pending) { return pending; }
 
     const watch = (resolve: (stop: () => void) => void, reject: (err: Error) => void) => {
-      let firstCall: boolean | void = true;
       let callsThisSecond = 0;
       let lastUpdate = 0;
       let liveWatcher: (() => void) | null = null;
@@ -704,7 +703,7 @@ export default class FireStash extends AbstractFireStash {
           }
         }
 
-        if (!liveWatcher) {
+        if (!liveWatcher) { // Intentionally not an else. Needs to run if set to null in above if statement.
           (!changed) ? (callsThisSecond += 1) : (callsThisSecond = 0);
           if (callsThisSecond >= 3) {
             callsThisSecond = 0;
@@ -718,9 +717,9 @@ export default class FireStash extends AbstractFireStash {
         }
 
         lastUpdate = now;
-        if (firstCall) {
+        if (this.watcherStarters[collection]) {
           delete this.watcherStarters[collection];
-          firstCall = resolve(() => this.unwatch(collection));
+          resolve(() => this.unwatch(collection));
         }
       };
 

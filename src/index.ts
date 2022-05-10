@@ -20,7 +20,11 @@ export default class FireStash extends AbstractFireStash {
 
   constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
     super(project, options);
-    this.#worker = fork(path.join(__dirname, './worker.js'), [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ]);
+    this.#worker = fork(
+      path.join(__dirname, './worker.js'),
+      [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ],
+      process.env.NODE_ENV !== 'production' ? { execArgv: ['--inspect=40894'] } : {},
+    );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') { this.#tasks[id][0](res); }
       else if (type === 'event') { this.emit(id, ...res); }
