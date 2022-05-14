@@ -766,7 +766,7 @@ export default class FireStash extends AbstractFireStash {
         delete this.watcherStarters[collection];
         reject?.(new Error(`Timeout: "${collection}" Collection Watch Snapshot Timed Out`));
       }
-    }, 10000);
+    }, 180000); // 3 minute max timeout on listener start.
 
     // Return new promise that resolves after initial snapshot is done.
     return localPromise;
