@@ -694,6 +694,25 @@ export default class FireStash extends AbstractFireStash {
     let timeoutId: NodeJS.Timeout | null = null;
     const query = this.db.collection('firestash').where('collection', '==', collection);
     const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
+      let isFirst = false;
+
+      if (this.watcherStarters[collection]) {
+        // If successfully completed first run.
+        if (this.watcherStarters[collection] === localPromise) {
+          delete this.watcherStarters[collection];
+          isFirst = true;
+        }
+
+        // If timed out and we've started again, clear our own watchers.
+        else {
+          if (this.#watchers.get(collection) === liveWatcher) {
+            this.#watchers.delete(collection);
+          }
+          liveWatcher?.();
+          timeoutId && clearTimeout(timeoutId);
+        }
+      }
+
       const now = update.readTime?.toMillis() || 0;
       const docs: FirebaseFirestore.DocumentSnapshot[] = update.docChanges().map(change => change.doc);
       const changed = await this.mergeRemote(collection, docs);
@@ -725,22 +744,7 @@ export default class FireStash extends AbstractFireStash {
       }
 
       lastUpdate = now;
-      if (this.watcherStarters[collection]) {
-        // If successfully completed first run.
-        if (this.watcherStarters[collection] === localPromise) {
-          delete this.watcherStarters[collection];
-          resolve?.(() => this.unwatch(collection));
-        }
-
-        // If timed out and we've started again, clear our own watchers.
-        else {
-          if (this.#watchers.get(collection) === liveWatcher) {
-            this.#watchers.delete(collection);
-          }
-          liveWatcher?.();
-          timeoutId && clearTimeout(timeoutId);
-        }
-      }
+      isFirst && resolve?.(() => this.unwatch(collection));
     };
 
     liveWatcher = query.onSnapshot(handleSnapshot, (err) => {
