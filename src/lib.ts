@@ -8,6 +8,7 @@ import * as RocksDb from 'rocksdb';
 import * as MemDown from 'memdown';
 import * as deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
+import * as LRU from 'lru-cache';
 
 import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types';
 
@@ -332,7 +333,7 @@ export default class FireStash extends AbstractFireStash {
                   const id = `${collection}/${key}`;
                   setDirty(localObj);
                   localBatch.put(id, localObj);
-                  this.documentMemo[id] = localObj;
+                  this.documentMemo.set(id, localObj);
                 });
               }
               const keys = events.get(collection) || new Set();
@@ -801,14 +802,14 @@ export default class FireStash extends AbstractFireStash {
     this.timeout = null;
   }
 
-  private documentMemo: Record<string, Buffer> = {};
+  private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
   private async safeGet(collection: string, key: string): Promise<Buffer | null> {
     const id = `${collection}/${key}`;
-    if (this.documentMemo[id]) { return this.documentMemo[id]; }
+    if (this.documentMemo.has(id)) { return this.documentMemo.get(id) || null; }
     if (this.options.lowMem) { return null; }
     try {
       const o = await this.level.get(id, { asBuffer: true }) || Buffer.from('1{}');
-      !this.options.lowMem && (this.documentMemo[id] = o);
+      !this.options.lowMem && (this.documentMemo.set(id, o));
       return o;
     }
     catch (_err) { return null; }
@@ -988,12 +989,12 @@ export default class FireStash extends AbstractFireStash {
           const data = stringify(obj);
           setClean(data);
           batch.put(id, data);
-          !this.options.lowMem && (this.documentMemo[id] = data);
+          !this.options.lowMem && (this.documentMemo.set(id, data));
           yield [ doc.id, obj ];
         }
         else {
           batch.del(id);
-          delete this.documentMemo[id];
+          this.documentMemo.delete(id);
         }
       }
       await batch.write();
@@ -1027,7 +1028,6 @@ export default class FireStash extends AbstractFireStash {
       // Ensure we're getting the latest stash data for this collection.
       !this.options.lowMem && await this.watch(collection);
       const stash = await this.stash(collection);
-
       if (this.options.lowMem) {
         const ids = id ? idArr : Object.keys(stash.cache);
         for (const id of ids) {
@@ -1124,11 +1124,11 @@ export default class FireStash extends AbstractFireStash {
             const data = stringify(obj);
             setClean(data);
             batch.put(id, data);
-            !this.options.lowMem && (this.documentMemo[id] = data);
+            !this.options.lowMem && (this.documentMemo.set(id, data));
           }
           else {
             batch.del(id);
-            delete this.documentMemo[id];
+            this.documentMemo.delete(id);
           }
         }
         await batch.write();
@@ -1159,7 +1159,7 @@ export default class FireStash extends AbstractFireStash {
           }
           localObj = stringify(val);
           localObj && setClean(localObj);
-          this.documentMemo[id] = localObj;
+          this.documentMemo.set(id, localObj);
           (localObj === null) ? await this.level.del(id) : await this.level.put(id, localObj);
         }
         this.emit(id, collection, [key]);

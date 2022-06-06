@@ -23,15 +23,22 @@ export default class FireStash extends AbstractFireStash {
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
       [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ],
+      // { execArgv: ['--inspect=40894'] },
       process.env.NODE_ENV !== 'production' ? { execArgv: ['--inspect=40894'] } : {},
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
-      if (type === 'method') { err ? this.#tasks[id][1](err) : this.#tasks[id][0](res); }
+      if (type === 'method') {
+        const cb = this.#tasks[id];
+        delete this.#tasks[id];
+        err ? cb[1](err) : cb[0](res);
+      }
       else if (type === 'event') { this.emit(id, ...res); }
       else if (type === 'snapshot') { this.#listeners[id]?.(res); }
       else if (type === 'iterator') {
-        if (err) { this.#iterators[id][1](new Error(err)); }
-        else { this.#iterators[id][0](res || null); }
+        const cb = this.#iterators[id];
+        delete this.#iterators[id];
+        if (err) { cb[1](new Error(err)); }
+        else { cb[0](res || null); }
       }
     });
 
@@ -55,7 +62,7 @@ export default class FireStash extends AbstractFireStash {
     message: [M, Parameters<IFireStash[M]>] | ['unsubscribe', [number]],
   ): Promise<Awaited<ReturnType<IFireStash[M]>>> {
     return new Promise<Awaited<ReturnType<IFireStash[M]>>>((resolve: (value: Awaited<ReturnType<IFireStash[M]>>) => void, reject: (err: Error) => void) => {
-      const id = this.#messageId++;
+      const id = this.#messageId = (this.#messageId + 1) % Number.MAX_SAFE_INTEGER;
       this.#tasks[id] = [ resolve, reject ];
       if (message[0] === 'onSnapshot') {
         this.#listeners[id] = message[1][1] as (snapshot?: unknown) => any;
@@ -89,16 +96,21 @@ export default class FireStash extends AbstractFireStash {
 
   async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
     let val: { value: [string, T | null]; done: boolean } = { value: [ '', null ], done: false };
-    const iteratorId = this.#messageId++;
+    const iteratorId = this.#messageId = (this.#messageId + 1) % Number.MAX_SAFE_INTEGER;
     let firstRun = true;
-    while (!val.done) {
-      val = await new Promise<{ value: [string, T | null]; done: boolean }>((resolve, reject) => {
-        this.#iterators[iteratorId] = [ resolve, reject ];
-        this.#worker.send([ iteratorId, [ 'stream', firstRun ? [ collection, id ] : null ]]);
-      });
-      firstRun = false;
-      if (val.done) { break; }
-      yield val.value;
+    try {
+      while (!val.done) {
+        val = await new Promise<{ value: [string, T | null]; done: boolean }>((resolve, reject) => {
+          this.#iterators[iteratorId] = [ resolve, reject ];
+          this.#worker.send([ iteratorId, [ 'stream', firstRun ? [ collection, id ] : null ]]);
+        });
+        firstRun = false;
+        if (val.done) { break; }
+        yield val.value;
+      }
+    }
+    finally {
+      this.#worker.send([ iteratorId, [ 'stream-end', null ]]);
     }
   }
 

@@ -20,10 +20,16 @@ const firestash = new WorkerFireStash(credential, options);
 const CALLBACK_METHODS = { watch: 1, onSnapshot: 1 };
 const unsubscribeCallbacks: Record<number, () => any> = {};
 const STREAMS: Record<number, AsyncIterableIterator<any>> = {};
-process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' | 'app'>>([ id, [ method, args ]]: [number, [ M, Parameters<IFireStash[M]>] | ['unsubscribe', []]]) {
+// eslint-disable-next-line max-len
+process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' | 'app'>>([ id, [ method, args ]]: [number, [ M, Parameters<IFireStash[M]>] | ['unsubscribe', []] | ['stream-end', []]]) {
   if (method === 'unsubscribe') {
     unsubscribeCallbacks[id]?.();
     process.send?.([ 'unsubscribe', id ]);
+    return;
+  }
+  if (method === 'stream-end') {
+    STREAMS[id]?.return?.();
+    delete STREAMS[id];
     return;
   }
   if (method === 'stream') {
@@ -32,6 +38,7 @@ process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' |
       const stream = STREAMS[id] = STREAMS[id] || firestash.stream.apply(firestash, args);
       const value = await stream.next();
       process.send?.([ 'iterator', id, value ]);
+      if (value.done) { delete STREAMS[id]; }
     }
     catch (err) {
       process.send?.([ 'iterator', id, null, err.message ]);
