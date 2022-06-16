@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
-import * as LRU from 'lru-cache';
+// import * as LRU from 'lru-cache';
 import type * as LevelUp from 'levelup';
 import type * as LevelDown from 'leveldown';
 import type * as RocksDb from 'rocksdb';
@@ -333,7 +333,7 @@ export default class FireStash extends AbstractFireStash {
                   const id = `${collection}/${key}`;
                   setDirty(localObj);
                   localBatch.put(id, localObj);
-                  this.documentMemo.set(id, localObj);
+                  // this.documentMemo.set(id, localObj);
                 });
               }
               const keys = events.get(collection) || new Set();
@@ -802,14 +802,14 @@ export default class FireStash extends AbstractFireStash {
     this.timeout = null;
   }
 
-  private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
+  // private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
   private async safeGet(collection: string, key: string): Promise<Buffer | null> {
     const id = `${collection}/${key}`;
-    if (this.documentMemo.has(id)) { return this.documentMemo.get(id) || null; }
+    // if (this.documentMemo.has(id)) { return this.documentMemo.get(id) || null; }
     if (this.options.lowMem) { return null; }
     try {
       const o = await this.level.get(id, { asBuffer: true }) || null;
-      !this.options.lowMem && (this.documentMemo.set(id, o));
+      // !this.options.lowMem && (this.documentMemo.set(id, o));
       return o;
     }
     catch (_err) { return null; }
@@ -974,12 +974,12 @@ export default class FireStash extends AbstractFireStash {
           const data = stringify(obj);
           setClean(data);
           batch.put(id, data);
-          !this.options.lowMem && (this.documentMemo.set(id, data));
+          // !this.options.lowMem && (this.documentMemo.set(id, data));
           yield [ doc.id, obj ];
         }
         else {
           batch.del(id);
-          this.documentMemo.delete(id);
+          // this.documentMemo.delete(id);
         }
       }
       await batch.write();
@@ -1092,11 +1092,11 @@ export default class FireStash extends AbstractFireStash {
             const data = stringify(obj);
             setClean(data);
             batch.put(id, data);
-            !this.options.lowMem && (this.documentMemo.set(id, data));
+            // !this.options.lowMem && (this.documentMemo.set(id, data));
           }
           else {
             batch.del(id);
-            this.documentMemo.delete(id);
+            // this.documentMemo.delete(id);
           }
         }
         await batch.write();
@@ -1128,7 +1128,7 @@ export default class FireStash extends AbstractFireStash {
           }
           localObj = stringify(val);
           localObj && setClean(localObj);
-          this.documentMemo.set(id, localObj);
+          // this.documentMemo.set(id, localObj);
           (localObj === null) ? batch.del(id) : batch.put(id, localObj);
         }
         this.emit(id, collection, [key]);
