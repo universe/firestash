@@ -23,8 +23,11 @@ export default class LevelSQLite {
   constructor(path: string) {
     this.path = path;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const SQLite = require('better-sqlite3');
-    this.db = new SQLite(this.path);
+    let SQLiteConstructor: typeof SQLite | undefined;
+    try { SQLiteConstructor = require('better-sqlite3'); }
+    catch { 1; }
+    if (!SQLiteConstructor) { throw new Error('Missing optional peer dependency "better-sqlite3".'); }
+    this.db = new SQLiteConstructor(this.path);
     this.db.unsafeMode(true);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS store (

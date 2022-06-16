@@ -18,10 +18,21 @@ export { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 const GET_PAGINATION_SIZE = 100;
 
 /* eslint-disable @typescript-eslint/no-var-requires */
-const levelup = require('levelup') as typeof LevelUp;
-const leveldown: typeof LevelDown.default = require('leveldown');
-const memdown: typeof MemDown.default = require('memdown');
-const rocksdb: typeof RocksDb.default = require('rocksdb');
+let levelup: typeof LevelUp | undefined;
+try { levelup = require('levelup') as typeof LevelUp | undefined; }
+catch { 1; }
+
+let leveldown: typeof LevelDown.default | undefined;
+try { leveldown = require('leveldown'); }
+catch { 1; }
+
+let memdown: typeof MemDown.default | undefined;
+try { memdown = require('memdown'); }
+catch { 1; }
+
+let rocksdb: typeof RocksDb.default | undefined;
+try { rocksdb = require('rocksdb'); }
+catch { 1; }
 /* eslint-enable @typescript-eslint/no-var-requires */
 
 declare global {
@@ -127,10 +138,14 @@ export default class FireStash extends AbstractFireStash {
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
     if (this.options.datastore === 'rocksdb' && this.dir) {
+      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
+      if (!rocksdb) { throw new Error('Missing optional peer dependency "rocksdb".'); }
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(rocksdb(path.join(this.dir, '.firestash.rocks')), { readOnly: this.options.readOnly });
     }
     else if (this.options.datastore === 'leveldown' && this.dir) {
+      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
+      if (!leveldown) { throw new Error('Missing optional peer dependency "leveldown".'); }
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
     }
@@ -139,6 +154,8 @@ export default class FireStash extends AbstractFireStash {
       this.level = new LevelSQLite(path.join(this.dir, '.firestash.db'));
     }
     else {
+      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
+      if (!memdown) { throw new Error('Missing optional peer dependency "memdown".'); }
       this.level = levelup(memdown());
     }
 
