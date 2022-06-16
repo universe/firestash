@@ -11,6 +11,7 @@ class WorkerFireStash extends FireStash {
 }
 
 // If the parent process dies and we become a zombie, shut ourselves down.
+// The "0" signal will test for the existence of the process.
 setInterval(() => {
   try { process.kill(parentPid, 0); }
   catch { process.exit(); }

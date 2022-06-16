@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 export type ServiceAccount = Firebase.ServiceAccount;
 
 export interface FireStashOptions {
-  datastore: 'rocksdb' | 'leveldown' | 'memdown';
+  datastore: 'sqlite' | 'rocksdb' | 'leveldown' | 'memdown';
   readOnly: boolean;
   lowMem: boolean;
   directory: string | null;
@@ -16,7 +16,7 @@ export interface IFireStashPage<T = number> {
 }
 
 const DEFAULT_OPTIONS: FireStashOptions = {
-  datastore: 'rocksdb',
+  datastore: 'sqlite',
   readOnly: false,
   lowMem: false,
   directory: null,

@@ -2,22 +2,27 @@ import Firebase from 'firebase-admin';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as LevelUp from 'levelup';
-import * as LevelDown from 'leveldown';
-import * as RocksDb from 'rocksdb';
-import * as MemDown from 'memdown';
 import * as deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
 import * as LRU from 'lru-cache';
+import type * as LevelUp from 'levelup';
+import type * as LevelDown from 'leveldown';
+import type * as RocksDb from 'rocksdb';
+import type * as MemDown from 'memdown';
 
+import LevelSQLite from './sqlite';
 import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types';
 
 export { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 
-const levelup = LevelUp as unknown as typeof LevelUp.default;
-const leveldown = LevelDown as unknown as typeof LevelDown.default;
-const memdown = MemDown as unknown as typeof MemDown.default;
-const rocksdb = RocksDb as unknown as typeof RocksDb.default;
+const GET_PAGINATION_SIZE = 100;
+
+/* eslint-disable @typescript-eslint/no-var-requires */
+const levelup = require('levelup') as typeof LevelUp;
+const leveldown: typeof LevelDown.default = require('leveldown');
+const memdown: typeof MemDown.default = require('memdown');
+const rocksdb: typeof RocksDb.default = require('rocksdb');
+/* eslint-enable @typescript-eslint/no-var-requires */
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -91,13 +96,6 @@ function ensureFirebaseSafe(obj: any, FieldValue: typeof Firebase.firestore.Fiel
   }
 }
 
-const DEFAULT_OPTIONS: FireStashOptions = {
-  datastore: 'rocksdb',
-  readOnly: false,
-  lowMem: false,
-  directory: null,
-};
-
 export default class FireStash extends AbstractFireStash {
   toUpdate: Map<string, Map<string, (object | typeof DELETE_RECORD | null)[]>> = new Map();
   firebase: typeof Firebase;
@@ -108,8 +106,7 @@ export default class FireStash extends AbstractFireStash {
   #watchers: Map<string, () => void> = new Map();
   timeout: NodeJS.Timeout | number | null = null;
   timeoutPromise: Promise<void> = Promise.resolve();
-  level: LevelUp.LevelUp;
-  options: FireStashOptions = { ...DEFAULT_OPTIONS };
+  level: LevelUp.LevelUp | LevelSQLite;
   documentListeners: Map<string, ThrottledSnapshot> = new Map();
 
   /**
@@ -124,12 +121,11 @@ export default class FireStash extends AbstractFireStash {
     this.app = Firebase.initializeApp(creds, `${creds.projectId}-firestash-${nanoid()}`);
     this.firebase = Firebase;
     this.db = this.app.firestore();
-    this.dir = options?.directory || null;
+    this.dir = this.options?.directory || null;
     this.log = console;
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
-
     if (this.options.datastore === 'rocksdb' && this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(rocksdb(path.join(this.dir, '.firestash.rocks')), { readOnly: this.options.readOnly });
@@ -137,6 +133,10 @@ export default class FireStash extends AbstractFireStash {
     else if (this.options.datastore === 'leveldown' && this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
+    }
+    else if (this.options.datastore === 'sqlite' && this.dir) {
+      fs.mkdirSync(this.dir, { recursive: true });
+      this.level = new LevelSQLite(path.join(this.dir, '.firestash.db'));
     }
     else {
       this.level = levelup(memdown());
@@ -808,7 +808,7 @@ export default class FireStash extends AbstractFireStash {
     if (this.documentMemo.has(id)) { return this.documentMemo.get(id) || null; }
     if (this.options.lowMem) { return null; }
     try {
-      const o = await this.level.get(id, { asBuffer: true }) || Buffer.from('1{}');
+      const o = await this.level.get(id, { asBuffer: true }) || null;
       !this.options.lowMem && (this.documentMemo.set(id, o));
       return o;
     }
@@ -905,43 +905,33 @@ export default class FireStash extends AbstractFireStash {
       }
     }
     else {
-      // Slightly faster to request the keys as strings instead of buffers.
-      const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
       const collectionPrefix = `${collection}/`;
       const sliceIdx = collectionPrefix.length;
       if (!toGet.length) {
-        await new Promise<void>((resolve, reject) => {
-          const process = (err?: Error | null, id?: string) => {
-            // If the key doesn't start with the collection name, we're done!
-            if (err || id === undefined || id.slice(0, sliceIdx) !== collectionPrefix) {
-              return iterator.end(() => err ? reject(err) : resolve());
-            }
-
-            // Queue up the next request!
-            iterator.next(process);
-
-            // If is in the provided ID set, is not the collection itself, queue a get for this key
-            if ((!ids.size || ids.has(id)) && id !== collection) {
-              toGet.push(id);
-            }
-          };
-          iterator.next(process);
-        });
+        // Slightly faster to request the keys as strings instead of buffers.
+        const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
+        for await (const [id] of iterator as unknown as AsyncIterableIterator<string>) {
+          if (!id || (id.slice(0, sliceIdx) !== collectionPrefix)) { break; }
+          // If is in the provided ID set, is not the collection itself, queue a get for this key
+          if ((!ids.size || ids.has(id)) && id !== collection) { toGet.push(id); }
+        }
       }
 
       let done = 0;
+      let records: (Buffer | undefined)[] = [];
       for (const id of toGet) {
-        // Get the document key relative to this collection.
-        const key = id.slice(sliceIdx);
-
-        // If this is a sub-collection item, continue.
-        if (key.indexOf('/') !== -1) {
-          if (++done === toGet.length) { break; }
-          continue;
+        if (done % GET_PAGINATION_SIZE === 0) {
+          records = await this.level.getMany(toGet.slice(done, done + GET_PAGINATION_SIZE), { asBuffer: true });
         }
 
+        // Get the document key relative to this collection.
+        const key = id.slice(sliceIdx);
+        const record = records[done++ % GET_PAGINATION_SIZE];
+
+        // If this is a sub-collection item, continue.
+        if (key.indexOf('/') !== -1) { continue; }
+
         try {
-          const record = await this.level.get(id, { asBuffer: true });
           // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
           // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
           if (!record) {
@@ -953,19 +943,14 @@ export default class FireStash extends AbstractFireStash {
           else {
             try {
               // Faster than one big parse at end.
-              if (isDirty(record)) {
-                modified.add(key);
-              }
-              else {
-                yield [ key, reify<T>(record) ];
-              }
+              if (isDirty(record)) { modified.add(key); }
+              else { yield [ key, reify<T>(record) ]; }
             }
             catch (err) {
               this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
               modified.add(key);
             }
           }
-          if (++done === toGet.length) { break; }
         }
         catch (err) {
           // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
@@ -1037,7 +1022,9 @@ export default class FireStash extends AbstractFireStash {
       else if (ids.size > 0 && ids.size <= 30) {
         for (const id of idArr) {
           const record = await this.safeGet(collection, id);
-          if (record && isClean(record) && !this.options.lowMem) { out[id] = reify<T>(record); }
+          if (record && isClean(record) && !this.options.lowMem) {
+            out[id] = reify<T>(record);
+          }
           else if (record && isDirty(record)) {
             modified.add(id);
           }
@@ -1048,71 +1035,52 @@ export default class FireStash extends AbstractFireStash {
         }
       }
       else {
-        // Slightly faster to request the keys as strings instead of buffers.
-        const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
         const collectionPrefix = `${collection}/`;
         const sliceIdx = collectionPrefix.length;
         if (!toGet.length) {
-          await new Promise<void>((resolve, reject) => {
-            const process = (err?: Error | null, id?: string) => {
-              // If the key doesn't start with the collection name, we're done!
-              if (err || id === undefined || id.slice(0, sliceIdx) !== collectionPrefix) {
-                return iterator.end(() => err ? reject(err) : resolve());
-              }
-
-              // Queue up the next request!
-              iterator.next(process);
-
-              // If is in the provided ID set, is not the collection itself, queue a get for this key
-              if ((!ids.size || ids.has(id)) && id !== collection) {
-                toGet.push(id);
-              }
-            };
-            iterator.next(process);
-          });
+          // Slightly faster to request the keys as strings instead of buffers.
+          const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
+          for await (const [id] of iterator as unknown as AsyncIterableIterator<string>) {
+            if (!id || (id.slice(0, sliceIdx) !== collectionPrefix)) { break; }
+            // If is in the provided ID set, is not the collection itself, queue a get for this key
+            if ((!ids.size || ids.has(id)) && id !== collection) { toGet.push(id); }
+          }
         }
 
-        await new Promise<void>((resolve) => {
-          let done = 0;
-          if (toGet.length === 0) { resolve(); }
-          for (const id of toGet) {
-            // Get the document key relative to this collection.
-            const key = id.slice(sliceIdx);
-
-            // If this is a sub-collection item, continue.
-            if (key.indexOf('/') !== -1) {
-              if (++done === toGet.length) { resolve(); }
-              continue;
-            }
-
-            this.level.get(id, { asBuffer: true }, (err, record) => {
-              // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
-              // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
-              if (err || !record) {
-                const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-                docMightExist && modified.add(key);
-              }
-
-              // If dirty, queue for fetch, otherwise add to our JSON return.
-              else {
-                try {
-                  // Faster than one big parse at end.
-                  out[key] = reify<T>(record);
-                  if (isDirty(record)) {
-                    modified.add(key);
-                  }
-                }
-                catch (err) {
-                  this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
-                  modified.add(key);
-                }
-              }
-              if (++done === toGet.length) { resolve(); }
-            });
+        let done = 0;
+        let records: (Buffer | undefined)[] = [];
+        for (const id of toGet) {
+          if (done % GET_PAGINATION_SIZE === 0) {
+            records = await this.level.getMany(toGet.slice(done, done + GET_PAGINATION_SIZE), { asBuffer: true });
           }
-        });
-      }
 
+          // Get the document key relative to this collection.
+          const key = id.slice(sliceIdx);
+          const record = records[done++ % GET_PAGINATION_SIZE];
+
+          // If this is a sub-collection item, continue.
+          if (key.indexOf('/') !== -1) { continue; }
+
+          // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
+          // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
+          if (!record) {
+            const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
+            docMightExist && modified.add(key);
+          }
+
+          // If dirty, queue for fetch, otherwise add to our JSON return.
+          else {
+            try {
+              out[key] = reify<T>(record); // Faster than one big parse at end.
+              isDirty(record) && modified.add(key);
+            }
+            catch (err) {
+              this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
+              modified.add(key);
+            }
+          }
+        }
+      }
       if (modified.size) {
         const documents = await this.fetchAllFromFirebase(collection, modified);
         // Insert all stashes and docs into the local store.
@@ -1147,6 +1115,7 @@ export default class FireStash extends AbstractFireStash {
   private drainEventsTimer: NodeJS.Immediate | null = null;
   public drainEventsPromise: Promise<void> = Promise.resolve();
   private async drainEvents() {
+    const batch = this.level.batch();
     for (const [ collection, records ] of this.localEvents) {
       const keyIds: string[] = [];
       for (const [ key, updates ] of records) {
@@ -1160,13 +1129,14 @@ export default class FireStash extends AbstractFireStash {
           localObj = stringify(val);
           localObj && setClean(localObj);
           this.documentMemo.set(id, localObj);
-          (localObj === null) ? await this.level.del(id) : await this.level.put(id, localObj);
+          (localObj === null) ? batch.del(id) : batch.put(id, localObj);
         }
         this.emit(id, collection, [key]);
         keyIds.push(key);
       }
       this.emit(collection, collection, keyIds);
     }
+    await batch.write();
     this.localEvents.clear();
     this.drainEventsTimer = null;
   }

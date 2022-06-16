@@ -23,7 +23,7 @@ export default class FireStash extends AbstractFireStash {
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
       [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ],
-      // { execArgv: ['--inspect=40894'] },
+      // { execArgv: ['--inspect-brk=40894'] },
       process.env.NODE_ENV !== 'production' ? { execArgv: ['--inspect=40894'] } : {},
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
@@ -51,7 +51,7 @@ export default class FireStash extends AbstractFireStash {
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
 
-    // Ensure we dont leave zombies around.
+    // Ensure we don't leave zombies around.
     process.on('exit', () => this.#worker.kill());
     process.on('SIGHUP', () => this.#worker.kill());
     process.on('SIGINT', () => this.#worker.kill());

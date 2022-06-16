@@ -19,13 +19,13 @@ describe('Connector', function() {
     const app = Firebase.initializeApp({ projectId });
     const firestore = app.firestore();
     let appId = 0;
-    let fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId++)) });
+    let fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
 
     beforeEach(async function() {
       this.timeout(60000);
       await fireStash.stop();
       await fireTest.clearFirestoreData({ projectId });
-      fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId++)) });
+      fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
       await wait(3000);
     });
 
@@ -73,13 +73,11 @@ describe('Connector', function() {
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => fetches.push(`${collection}/${id}`));
       assert.deepStrictEqual((await fireStash.watchers()).size, 0, 'No watchers by default.');
-      // rejects(() => fireStash.level.get('tests/doc'), 'Key does not exist in stash');
       assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
       assert.deepStrictEqual((await fireStash.watchers()).size, 1, 'One watcher started after read.');
       assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
 
       await fireStash.unwatch('tests');
-      // rejects(() => fireStash.level.get('tests/doc'), 'Key does not exist in stash');
       assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
       assert.deepStrictEqual((await fireStash.watchers()).size, 1, 'One watcher started after read.');
       assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
@@ -443,6 +441,8 @@ describe('Connector', function() {
 
       assert.strictEqual(Object.keys(res).length, 15000, 'Fetches all values');
       console.log('time', done - now);
+      console.log((performance as any).getEntriesByName('bulkGet'));
+      console.log((performance as any).getEntriesByName('bulkUpdate'));
       assert.ok(done - now < 3000, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
 
       now = performance.now();
@@ -730,7 +730,7 @@ describe('Connector', function() {
       unSub();
     });
 
-    it('listens to remote', async function() {
+    it('listens to remote 2', async function() {
       this.timeout(80000);
       await fireStash.watch('contacts');
       for (let i = 0; i < 10; i++) {
