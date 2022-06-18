@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "2.2.6",
+  "version": "2.2.7",
   "main": "dist/src/index.js",
   "license": "MIT",
   "private": false,

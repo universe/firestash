@@ -28,11 +28,11 @@ export default class LevelSQLite {
     try { SQLiteConstructor = require('better-sqlite3'); }
     catch { 1; }
     if (!SQLiteConstructor) { throw new Error('Missing optional peer dependency "better-sqlite3".'); }
-    try {
-      this.db = new SQLiteConstructor(this.path);
-    }
+    try { this.db = new SQLiteConstructor(this.path); }
     catch {
-      fs.unlinkSync(this.path);
+      fs.existsSync(this.path) && fs.unlinkSync(this.path);
+      fs.existsSync(`${this.path}-shm`) && fs.unlinkSync(`${this.path}-shm`);
+      fs.existsSync(`${this.path}-wal`) && fs.unlinkSync(`${this.path}-wal`);
       this.db = new SQLiteConstructor(this.path);
     }
     this.db.pragma('journal_mode = WAL');
