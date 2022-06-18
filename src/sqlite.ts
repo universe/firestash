@@ -13,8 +13,8 @@ export interface LevelSQLiteIterator {
 }
 
 export default class LevelSQLite {
-  private path: string;
-  private db: SQLite.Database;
+  public readonly path: string;
+  public readonly db: SQLite.Database;
   private _get: SQLite.Statement;
   private _getAll: SQLite.Statement;
   private _put: SQLite.Statement;

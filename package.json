@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "2.2.4",
+  "version": "2.2.6",
   "main": "dist/src/index.js",
   "license": "MIT",
   "private": false,
@@ -12,8 +12,6 @@
     "lint:fix": "eslint **/*.ts --fix",
     "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test",
     "clean-mocha": "mocha -r dotenv/config dist/test",
-    "whee": "0x -o dist/src/test.js",
-    "kay": "node dist/src/test.js",
     "deploy": "NODE_ENV=production firebase deploy",
     "emulate": "firebase emulators:start"
   },
