@@ -33,7 +33,7 @@ describe('Connector', function() {
       assert.ok(res ? val.equals(res) : false, 'Gets and sets buffers.');
       await db.del('foo');
       const gone = await db.get('foo');
-      assert.strictEqual(gone, null, 'Value is gone');
+      assert.strictEqual(gone, undefined, 'Value is gone');
     });
 
     it('is able to batch updates', async function() {
@@ -49,7 +49,7 @@ describe('Connector', function() {
 
       assert.ok(bar.equals(await db.get('foo') as Buffer), 'Gets and sets buffers.');
       assert.ok(buzz.equals(await db.get('fizz') as Buffer), 'Gets and sets buffers.');
-      assert.strictEqual(await db.get('biz'), null, 'Value is gone');
+      assert.strictEqual(await db.get('biz'), undefined, 'Value is gone');
     });
 
     it('is able to iterate with gt and lt', async function() {
@@ -68,7 +68,7 @@ describe('Connector', function() {
       while (run) {
         iter.next((_err, val) => {
           if (!val) { run = false; }
-          else { values.push(val); }
+          else { values.push(val[0]); }
         });
       }
       iter.end();
@@ -91,11 +91,34 @@ describe('Connector', function() {
       while (run) {
         iter.next((_err, val) => {
           if (!val) { run = false; }
-          else { values.push(val); }
+          else { values.push(val[0]); }
         });
       }
       iter.end();
       assert.deepStrictEqual(values, [ 'fizz', 'foo' ]);
+    });
+
+    it('is able to iterate just gte', async function() {
+      const batch = db.batch();
+      const bar = Buffer.from('bar');
+      const baz = Buffer.from('baz');
+      const buzz = Buffer.from('buzz');
+      batch.put('foo', bar);
+      batch.put('biz', baz);
+      batch.put('fizz', buzz);
+      await batch.write();
+
+      let run = true;
+      const values: string[] = [];
+      const iter = db.iterator({ gte: 'biz' });
+      while (run) {
+        iter.next((_err, val) => {
+          if (!val) { run = false; }
+          else { values.push(val[0]); }
+        });
+      }
+      iter.end();
+      assert.deepStrictEqual(values, [ 'biz', 'fizz', 'foo' ]);
     });
 
     it('is able to iterate just lt', async function() {
@@ -114,7 +137,30 @@ describe('Connector', function() {
       while (run) {
         iter.next((_err, val) => {
           if (!val) { run = false; }
-          else { values.push(val); }
+          else { values.push(val[0]); }
+        });
+      }
+      iter.end();
+      assert.deepStrictEqual(values, [ 'biz', 'fizz' ]);
+    });
+
+    it('is able to iterate just lte', async function() {
+      const batch = db.batch();
+      const bar = Buffer.from('bar');
+      const baz = Buffer.from('baz');
+      const buzz = Buffer.from('buzz');
+      batch.put('foo', bar);
+      batch.put('biz', baz);
+      batch.put('fizz', buzz);
+      await batch.write();
+
+      let run = true;
+      const values: string[] = [];
+      const iter = db.iterator({ lte: 'fizz' });
+      while (run) {
+        iter.next((_err, val) => {
+          if (!val) { run = false; }
+          else { values.push(val[0]); }
         });
       }
       iter.end();
@@ -137,11 +183,34 @@ describe('Connector', function() {
       while (run) {
         iter.next((_err, val) => {
           if (!val) { run = false; }
-          else { values.push(val); }
+          else { values.push(val[0]); }
         });
       }
       iter.end();
       assert.deepStrictEqual(values, [ 'biz', 'fizz', 'foo' ]);
+    });
+
+    it('is able to iterate with no constraints in reverse', async function() {
+      const batch = db.batch();
+      const bar = Buffer.from('bar');
+      const baz = Buffer.from('baz');
+      const buzz = Buffer.from('buzz');
+      batch.put('foo', bar);
+      batch.put('biz', baz);
+      batch.put('fizz', buzz);
+      await batch.write();
+
+      let run = true;
+      const values: string[] = [];
+      const iter = db.iterator({ reverse: true });
+      while (run) {
+        iter.next((_err, val) => {
+          if (!val) { run = false; }
+          else { values.push(val[0]); }
+        });
+      }
+      iter.end();
+      assert.deepStrictEqual(values, [ 'foo', 'fizz', 'biz' ]);
     });
   });
 });

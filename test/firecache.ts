@@ -105,6 +105,9 @@ describe('Connector', function() {
       firestore.doc('contacts/2').set({ biz: 'baz' });
       fireStash.update('contacts', '2');
       await fireStash.allSettled();
+      console.log(await fireStash.stash('contacts'));
+      console.log(await fireStash.get('contacts'));
+      console.log(fetches);
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' }, 2: { biz: 'baz' } }, 'Gets all data');
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
