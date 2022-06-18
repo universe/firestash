@@ -1,5 +1,5 @@
 import type * as SQLite from 'better-sqlite3';
-
+import * as fs from 'fs';
 export interface LevelSQLiteBatch {
   put(key: string, value: Buffer | string): void;
   del(key: string): void;
@@ -28,7 +28,14 @@ export default class LevelSQLite {
     try { SQLiteConstructor = require('better-sqlite3'); }
     catch { 1; }
     if (!SQLiteConstructor) { throw new Error('Missing optional peer dependency "better-sqlite3".'); }
-    this.db = new SQLiteConstructor(this.path);
+    try {
+      this.db = new SQLiteConstructor(this.path);
+    }
+    catch {
+      fs.unlinkSync(this.path);
+      this.db = new SQLiteConstructor(this.path);
+    }
+    this.db.pragma('journal_mode = WAL');
     this.db.unsafeMode(true);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS store (
