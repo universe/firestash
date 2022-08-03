@@ -1,7 +1,18 @@
-import type Firebase from 'firebase-admin';
+import Firebase from 'firebase/compat/app';
+import 'firebase/compat/auth';
+import 'firebase/compat/firestore';
 import { EventEmitter } from 'events';
 
-export type ServiceAccount = Firebase.ServiceAccount;
+export type ServiceAccount = {
+  projectId: string;
+  apiKey?: string;
+  appId?: string;
+  authDomain?: string;
+  databaseURL?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  measurementId?: string;
+};
 
 export interface FireStashOptions {
   datastore: 'sqlite' | 'rocksdb' | 'leveldown' | 'memdown';
@@ -53,7 +64,7 @@ declare interface AbstractFireStash {
 }
 
 abstract class AbstractFireStash extends EventEmitter implements IFireStash {
-  protected project: ServiceAccount | string | null;
+  protected project: ServiceAccount;
   protected options: FireStashOptions = { ...DEFAULT_OPTIONS };
 
   public readonly abstract app: Firebase.app.App;
@@ -66,7 +77,7 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
    * @param app The Firebase App Instance.
    * @param directory The cache backup directory (optional)
    */
-  constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
+  constructor(project: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
     super();
     this.project = project;
     this.options = Object.assign(this.options, options);

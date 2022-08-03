@@ -23,13 +23,13 @@ describe('Connector', function() {
     const app = Firebase.initializeApp({ projectId });
     const firestore = app.firestore();
     let appId = 0;
-    let fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
+    let fireStash = new FireStash({ projectId }, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
 
     beforeEach(async function() {
       this.timeout(60000);
       await fireStash.stop();
       await fireTest.clearFirestoreData({ projectId });
-      fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
+      fireStash = new FireStash({ projectId }, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
       await wait(3000);
     });
 
@@ -71,7 +71,7 @@ describe('Connector', function() {
     });
 
     it('creates in-memory local db if started with no root directory', async function() {
-      const memStash = new FireStash(projectId);
+      const memStash = new FireStash({ projectId });
       memStash.update('contacts', 'id1');
       await memStash.allSettled();
       assert.deepStrictEqual(await memStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
@@ -127,7 +127,7 @@ describe('Connector', function() {
       fireStash.update('contacts', '2');
       await fireStash.allSettled();
 
-      const otherFireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId + '-other')) });
+      const otherFireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId + '-other')) });
       otherFireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
         called++;
@@ -217,7 +217,7 @@ describe('Connector', function() {
     });
 
     it('is able to watch an object for deletion', async function() {
-      this.timeout(4000);
+      this.timeout(50000);
       fireStash.update('contacts', '1', { foo: 'bar' });
       await fireStash.allSettled();
       fireStash.watch('contacts');
@@ -474,7 +474,7 @@ describe('Connector', function() {
         this.timeout(300000);
 
         await fireStash.stop();
-        fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId++)), lowMem: true });
+        fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId++)), lowMem: true });
 
         const start = Date.now();
         const cache = {};
@@ -782,7 +782,7 @@ describe('Connector', function() {
       fireStash.stop();
       await firestore.doc('remote-changes/1').set({ id: 1 });
       await firestore.doc(`firestash/${cacheKey('remote-changes', 0)}`).set({ collection: 'remote-changes', cache: { 1: 1 } });
-      fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId)) });
+      fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId)) });
       const data = await fireStash.get('remote-changes', ['1']);
       assert.deepStrictEqual(data, { 1: { id: 1 } });
     });

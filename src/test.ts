@@ -13,7 +13,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 async function run() {
   let appId = 0;
-  const fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId++)) });
+  const fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId++)) });
 
   const promises: Promise<void>[] = [];
   const bigString = 'x'.repeat(30 * 1024);
