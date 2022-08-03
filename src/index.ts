@@ -1,6 +1,8 @@
 import * as path from 'path';
 import { fork, ChildProcess } from 'child_process';
-import Firebase from 'firebase-admin';
+import Firebase from 'firebase/compat/app';
+import 'firebase/compat/auth';
+import 'firebase/compat/firestore';
 import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 
@@ -21,12 +23,12 @@ export default class FireStash extends AbstractFireStash {
   db: Firebase.firestore.Firestore;
   firebase: typeof Firebase;
 
-  constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
-    super(project, options);
+  constructor(config: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
+    super(config, options);
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
-      [ JSON.stringify(project), JSON.stringify(options || {}), String(process.pid) ],
-      process.env.NODE_ENV === 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
+      [ JSON.stringify(config), JSON.stringify(options), String(process.pid) ],
+      process.env.NODE_ENV !== 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') {
@@ -45,13 +47,14 @@ export default class FireStash extends AbstractFireStash {
     });
 
     // Start our own firebase connection for in-process access.
-    const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
+    // const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
     this.firebase = Firebase;
-    this.app = Firebase.initializeApp(creds, `${creds.projectId}-firestash-${nanoid()}`);
+    this.app = Firebase.initializeApp(config, `${config.projectId}-firestash-${nanoid()}`);
     this.db = this.app.firestore();
+    this.db.useEmulator('localhost', 5050);
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
-    this.db.settings({ ignoreUndefinedProperties: true });
+    this.db.settings({ ignoreUndefinedProperties: true, merge: true });
 
     // Ensure we don't leave zombies around.
     process.on('exit', () => this.#worker.kill());
