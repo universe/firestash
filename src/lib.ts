@@ -177,7 +177,7 @@ export default class FireStash extends AbstractFireStash {
   private stashMemo: Record<string, IFireStashPage> = {};
   private stashPagesMemo: Record<string, Record<string, IFireStashPage | undefined>> = {};
   private async stashPages(collection: string): Promise<Record<string, IFireStashPage | undefined>> {
-    if (this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
+    if (!this.options.lowMem && this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
     if (this.options.lowMem) {
       const out: Record<string, IFireStashPage> = {};
       const res = await this.db.collection('firestash').where('collection', '==', collection).get();
@@ -200,7 +200,7 @@ export default class FireStash extends AbstractFireStash {
    * @param collection Collection Path
    */
   async stash(collection: string): Promise<IFireStashPage> {
-    if (this.stashMemo[collection]) { return this.stashMemo[collection]; }
+    if (!this.options.lowMem && this.stashMemo[collection]) { return this.stashMemo[collection]; }
 
     const pages = await this.stashPages(collection);
     const out: IFireStashPage = { collection, cache: {} };
@@ -209,7 +209,7 @@ export default class FireStash extends AbstractFireStash {
       Object.assign(out.cache, dat.cache);
     }
 
-    return this.stashMemo[collection] = out;
+    return this.options.lowMem ? out : (this.stashMemo[collection] = out);
   }
 
   /**
@@ -549,7 +549,7 @@ export default class FireStash extends AbstractFireStash {
     // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
     const batch = this.level.batch();
     batch.put(collection, stringify(local));
-    this.stashPagesMemo[collection] = local;
+    !this.options.lowMem && (this.stashPagesMemo[collection] = local);
 
     // Re-compute on next stash() request.
     delete this.stashMemo[collection];
