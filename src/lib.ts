@@ -135,6 +135,12 @@ export default class FireStash extends AbstractFireStash {
     this.dir = this.options?.directory || null;
     this.log = console;
 
+    // Clean up after ourselves if the process exits.
+    process.on('exit', () => this.stop());
+    process.on('SIGHUP', () => this.stop());
+    process.on('SIGINT', () => this.stop());
+    process.on('SIGTERM', () => this.stop());
+
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
     if (this.options.datastore === 'rocksdb' && this.dir) {

@@ -56,8 +56,3 @@ process.on('message', async function <M extends Exclude<keyof IFireStash, 'db' |
     .then((res) => process.send?.([ 'method', id, CALLBACK_METHODS[method as string] ? undefined : res ]))
     .catch((err) => process.send?.([ 'method', id, undefined, err ]));
 });
-
-process.on('exit', () => firestash.stop());
-process.on('SIGHUP', () => process.exit(128 + 1));
-process.on('SIGINT', () => process.exit(128 + 2));
-process.on('SIGTERM', () => process.exit(128 + 15));
