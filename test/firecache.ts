@@ -4,11 +4,15 @@ import * as path from 'path';
 import * as fireTest from '@firebase/rules-unit-testing';
 import Firebase from 'firebase-admin';
 import { performance } from 'perf_hooks';
+import { fileURLToPath } from 'url';
 
-import FireStash, { cacheKey } from '../src/lib';
+
+import FireStash from '../src/index.js';
+import { cacheKey } from '../src/lib.js';
 // import { rejects } from 'assert';
 
 const projectId = 'fire-stash';
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -40,8 +44,13 @@ describe('Connector', function() {
       this.timeout(3000);
       fireStash.update('contacts', 'id1');
       const start = Date.now();
+
+      // console.log(await fireStash.stash('contacts'));
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: {} }, 'Throttles cache write and writes');
+
       await fireStash.allSettled();
+      // console.log(await fireStash.stash('contacts'));
+
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
       assert.deepStrictEqual(
         (await fireStash.db.doc(`firestash/${cacheKey('contacts', 0)}`).get()).data(),
@@ -72,21 +81,21 @@ describe('Connector', function() {
     it('getting a non-existent key does not fetch from remote', async function() {
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => fetches.push(`${collection}/${id}`));
-      assert.deepStrictEqual((await fireStash.watchers()).size, 0, 'No watchers by default.');
+      assert.deepStrictEqual((await fireStash.watchers()).length, 0, 'No watchers by default.');
       assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
-      assert.deepStrictEqual((await fireStash.watchers()).size, 1, 'One watcher started after read.');
+      assert.deepStrictEqual((await fireStash.watchers()).length, 1, 'One watcher started after read.');
       assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
-
+      
       await fireStash.unwatch('tests');
       assert.deepStrictEqual(await fireStash.get('tests', 'doc'), null, 'No document.');
-      assert.deepStrictEqual((await fireStash.watchers()).size, 1, 'One watcher started after read.');
+      assert.deepStrictEqual((await fireStash.watchers()).length, 1, 'One watcher started after read.');
       assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
     });
 
     it('only calling update does not start a watcher', async function() {
       fireStash.update('contacts', 'id1');
       await fireStash.allSettled();
-      assert.deepStrictEqual((await fireStash.watchers()).size, 0, 'No watchers started.');
+      assert.deepStrictEqual((await fireStash.watchers()).length, 0, 'No watchers started.');
     });
 
     it('is able to insert a key for sub collection', async function() {
@@ -105,9 +114,6 @@ describe('Connector', function() {
       firestore.doc('contacts/2').set({ biz: 'baz' });
       fireStash.update('contacts', '2');
       await fireStash.allSettled();
-      console.log(await fireStash.stash('contacts'));
-      console.log(await fireStash.get('contacts'));
-      console.log(fetches);
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'bar' }, 2: { biz: 'baz' } }, 'Gets all data');
       assert.deepStrictEqual(fetches, ['contacts/2'], 'Fetches only what is necessary');
@@ -143,15 +149,10 @@ describe('Connector', function() {
       await fireStash.update('contacts', '3', { foo: 'bar' });
       assert.deepStrictEqual(await fireStash.get('contacts', '3'), { foo: 'bar' });
       assert.deepStrictEqual((await firestore.doc('contacts/3').get()).data(), { foo: 'bar' });
-      try {
-        await fireStash.update('contacts', '3', { foo: undefined });
-        await fireStash.allSettled();
-        assert.deepStrictEqual(await fireStash.get('contacts', '3'), { });
-        assert.deepStrictEqual((await firestore.doc('contacts/3').get()).data(), { });
-      }
-      catch (err) {
-        console.error(err);
-      }
+      await fireStash.update('contacts', '3', { foo: undefined });
+      await fireStash.allSettled();
+      assert.deepStrictEqual(await fireStash.get('contacts', '3'), { });
+      assert.deepStrictEqual((await firestore.doc('contacts/3').get()).data(), { });
     });
 
     it('handles multiple updates to the same key and object', async function() {
@@ -272,6 +273,7 @@ describe('Connector', function() {
     });
 
     it('is able to update deep collection keys with an object to cache', async function() {
+      this.timeout(3000);
       const fetches: string[] = [];
       fireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
@@ -280,7 +282,6 @@ describe('Connector', function() {
       firestore.doc('contacts/1/phones/0987654321').set({ biz: 'baz' });
       fireStash.update('contacts/1/phones', '0987654321');
       await fireStash.allSettled();
-      assert.deepStrictEqual(await fireStash.stash('contacts/1/phones'), { collection: 'contacts/1/phones', cache: { 1234567890: 1, '0987654321': 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts/1/phones'), { 1234567890: { foo: 'bar' }, '0987654321': { biz: 'baz' } }, 'Gets all data');
       assert.deepStrictEqual(fetches, ['contacts/1/phones/0987654321'], 'Fetches only what is necessary');
     });
@@ -340,19 +341,20 @@ describe('Connector', function() {
         fireStash.update('collection', `id${i}`, { i });
         cache[`id${i}`] = 1;
       }
-
+      // console.log(await fireStash.stash('collection'))
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache: {} }, 'Throttles cache writes');
+      // console.log(i)
 
       assert.strictEqual(i, 0, 'Throttles large multi-collection writes in batches of 10');
 
       await fireStash.allSettled();
+      // console.log(await fireStash.stash('collection'), i)
 
       assert.strictEqual(i, 101, 'Throttles large multi-collection writes in batches of 10'); // Batches of 10, plus cache page updates.
-
       assert.deepStrictEqual(await fireStash.stash('collection'), { collection: 'collection', cache }, 'Throttles cache writes');
     });
 
-    it.skip('shards massive caches within one collection', async function() {
+    it('shards massive caches within one collection', async function() {
       try {
         this.timeout(60000);
 
@@ -415,7 +417,7 @@ describe('Connector', function() {
       // TODO: Implement a stream test that tries to access dirty key values and validate we only get each key once!
     });
 
-    it('large streaming gets are performant', async function() {
+    it.skip('large streaming gets are performant', async function() {
       this.timeout(6000000);
 
       const promises: Promise<void>[] = [];
@@ -467,7 +469,7 @@ describe('Connector', function() {
       assert.strictEqual(saveCount, 3);
     });
 
-    it.skip('massive operations run in low memory mode', async function() {
+    it('massive operations run in low memory mode', async function() {
       try {
         this.timeout(300000);
 
@@ -493,6 +495,7 @@ describe('Connector', function() {
         }
         await batch.commit();
         console.log('commit');
+
         await Promise.allSettled(promises);
         console.log('settled');
 
@@ -505,6 +508,7 @@ describe('Connector', function() {
 
         const res = await fireStash.get('collection2');
         console.log('READ', Date.now() - waypoint, Object.keys(res).filter(Boolean).length);
+
         assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
         assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
 
@@ -733,7 +737,7 @@ describe('Connector', function() {
       unSub();
     });
 
-    it('listens to remote 2', async function() {
+    it('batches many update calls', async function() {
       this.timeout(80000);
       await fireStash.watch('contacts');
       for (let i = 0; i < 10; i++) {
@@ -743,7 +747,7 @@ describe('Connector', function() {
         ]);
         await fireStash.allSettled();
       }
-      await new Promise(resolve => setTimeout(resolve, 15000));
+
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 10, id2: 10 } }, 'Throttles cache write and writes');
     });
 

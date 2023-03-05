@@ -1,5 +1,6 @@
-import type * as SQLite from 'better-sqlite3';
+import type SQLite from 'better-sqlite3';
 import * as fs from 'fs';
+
 export interface LevelSQLiteBatch {
   put(key: string, value: Buffer | string): void;
   del(key: string): void;
@@ -12,6 +13,10 @@ export interface LevelSQLiteIterator {
   [Symbol.asyncIterator](): AsyncIterableIterator<[string]>;
 }
 
+let SQLiteConstructor: typeof SQLite | undefined;
+try { SQLiteConstructor = (await import('better-sqlite3')).default as unknown as typeof SQLite; }
+catch { 1; }
+
 export default class LevelSQLite {
   public readonly path: string;
   public readonly db: SQLite.Database;
@@ -23,10 +28,6 @@ export default class LevelSQLite {
   private _iteratorDesc: SQLite.Statement;
   constructor(path: string) {
     this.path = path;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    let SQLiteConstructor: typeof SQLite | undefined;
-    try { SQLiteConstructor = require('better-sqlite3'); }
-    catch { 1; }
     if (!SQLiteConstructor) { throw new Error('Missing optional peer dependency "better-sqlite3".'); }
     try { this.db = new SQLiteConstructor(this.path); }
     catch {

@@ -26,7 +26,7 @@ export interface IFireStash {
   app: Firebase.app.App;
   db: Firebase.firestore.Firestore;
   cacheKey(collection: string, page: number): string;
-  watchers(): Promise<Set<string>>;
+  watchers(): Promise<string[]>;
   allSettled(): Promise<void>;
   stash(collection: string): Promise<IFireStashPage>;
   onSnapshot<Document = any>(documentPath: string, callback: (snapshot?: Document) => any, timeout?: number): Promise<() => void>;
@@ -77,7 +77,7 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
   /**
    * Resolves with all collections currently being watched for updates.
    */
-  abstract watchers(): Promise<Set<string>>;
+  abstract watchers(): Promise<string[]>;
 
   /**
    * Resolves when all previously called updates are written to remote. Like requestAnimationFrame for the collection cache.

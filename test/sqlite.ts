@@ -1,7 +1,10 @@
 import { describe, beforeEach, after, it } from 'mocha';
 import { assert } from 'chai';
 import * as path from 'path';
-import SQLite from '../src/sqlite';
+import SQLite from '../src/sqlite.js';
+import { fileURLToPath } from 'url';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 describe('Connector', function() {
   describe('it should', function() {

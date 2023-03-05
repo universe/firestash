@@ -2,38 +2,36 @@ import Firebase from 'firebase-admin';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as deepMerge from 'deepmerge';
+import deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
 // import * as LRU from 'lru-cache';
-import type * as LevelUp from 'levelup';
-import type * as LevelDown from 'leveldown';
-import type * as RocksDb from 'rocksdb';
-import type * as MemDown from 'memdown';
+import type LevelUp from 'levelup';
+import type LevelDown from 'leveldown';
+import type RocksDb from 'rocksdb';
+import type MemDown from 'memdown';
 
-import LevelSQLite from './sqlite';
-import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types';
+import LevelSQLite from './sqlite.js';
+import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
 
-export { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
+export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 
 const GET_PAGINATION_SIZE = 100;
 
-/* eslint-disable @typescript-eslint/no-var-requires */
 let levelup: typeof LevelUp | undefined;
-try { levelup = require('levelup') as typeof LevelUp | undefined; }
+try { levelup = (await import('levelup')).default as unknown as typeof LevelUp; }
 catch { 1; }
 
 let leveldown: typeof LevelDown.default | undefined;
-try { leveldown = require('leveldown'); }
+try { leveldown = (await import('leveldown')).default as unknown as typeof LevelDown.default; }
 catch { 1; }
 
 let memdown: typeof MemDown.default | undefined;
-try { memdown = require('memdown'); }
+try { memdown = (await import('memdown')).default as unknown as typeof MemDown.default; }
 catch { 1; }
 
 let rocksdb: typeof RocksDb.default | undefined;
-try { rocksdb = require('rocksdb'); }
+try { rocksdb = (await import('rocksdb')).default as unknown as typeof RocksDb.default; }
 catch { 1; }
-/* eslint-enable @typescript-eslint/no-var-requires */
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -116,7 +114,7 @@ export default class FireStash extends AbstractFireStash {
   log: typeof console;
   #watchers: Map<string, () => void> = new Map();
   timeout: NodeJS.Timeout | number | null = null;
-  timeoutPromise: Promise<void> = Promise.resolve();
+  timeoutPromise: Promise<void> | null = null;
   level: LevelUp.LevelUp | LevelSQLite;
   documentListeners: Map<string, ThrottledSnapshot> = new Map();
 
@@ -173,17 +171,15 @@ export default class FireStash extends AbstractFireStash {
 
   cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
 
-  async watchers() { return new Set(this.#watchers.keys()); }
+  async watchers() { return [...new Set(this.#watchers.keys())]; }
 
   /**
    * Resolves when all previously called updates are written to remote. Like requestAnimationFrame for the collection cache.
    */
-  allSettled() { return this.timeoutPromise; }
+  allSettled() { return this.timeoutPromise || Promise.resolve(); }
 
-  private stashMemo: Record<string, IFireStashPage> = {};
   private stashPagesMemo: Record<string, Record<string, IFireStashPage | undefined>> = {};
   private async stashPages(collection: string): Promise<Record<string, IFireStashPage | undefined>> {
-    if (!this.options.lowMem && this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
     if (this.options.lowMem) {
       const out: Record<string, IFireStashPage> = {};
       const res = await this.db.collection('firestash').where('collection', '==', collection).get();
@@ -193,6 +189,7 @@ export default class FireStash extends AbstractFireStash {
       }
       return out;
     }
+    if (this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
     try {
       return this.stashPagesMemo[collection] = (reify(await this.level.get(collection, { asBuffer: true }) || null) as Record<string, IFireStashPage>) || {};
     }
@@ -205,6 +202,7 @@ export default class FireStash extends AbstractFireStash {
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
    */
+  private stashMemo: Record<string, IFireStashPage> = {};
   async stash(collection: string): Promise<IFireStashPage> {
     if (!this.options.lowMem && this.stashMemo[collection]) { return this.stashMemo[collection]; }
 
@@ -212,7 +210,11 @@ export default class FireStash extends AbstractFireStash {
     const out: IFireStashPage = { collection, cache: {} };
     for (const dat of Object.values(pages)) {
       if (!dat) { continue; }
-      Object.assign(out.cache, dat.cache);
+      for (const [key, value] of Object.entries(dat.cache)) {
+        // If the incrementing count is fragmented across multiple pages, we
+        // need to account for all values added. Sum them to get the real count.
+        out.cache[key] = (out.cache[key] || 0) + value;
+      }
     }
 
     return this.options.lowMem ? out : (this.stashMemo[collection] = out);
@@ -224,8 +226,8 @@ export default class FireStash extends AbstractFireStash {
   private async saveCacheUpdate() {
     // Wait for our local events queue to finish before syncing remote.
     await this.drainEventsPromise;
-
     this.timeout = null;
+    this.timeoutPromise = null;
     const FieldValue = this.firebase.firestore.FieldValue;
     /* eslint-disable-next-line */
     const promises: Promise<any>[] = [];
@@ -311,14 +313,14 @@ export default class FireStash extends AbstractFireStash {
           // Check to make sure this key doesn't already exist on remote. If it does, use its existing page.
           // TODO: Perf? This is potentially a lot of looping.
           const hasPageNum = numId(key) % pageCount;
-          if (localStash[cacheKey(collection, hasPageNum)]?.cache[key]) {
+          if (localStash[cacheKey(collection, hasPageNum)]?.cache?.[key]) {
             pageIdx = hasPageNum;
           }
           else {
             let i = 0;
             for (const dat of Object.values(localStash)) {
               if (!dat) { continue; }
-              if (dat.cache[key]) { pageIdx = i; break; }
+              if (dat.cache?.[key]) { pageIdx = i; break; }
               i++;
             }
           }
@@ -804,8 +806,7 @@ export default class FireStash extends AbstractFireStash {
    * Finish the last update and disconnect all watchers and timeouts.
    */
   async unwatch(collection: string) {
-    const unsubscribe = this.#watchers.get(collection);
-    unsubscribe && unsubscribe();
+    this.#watchers.get(collection)?.();
     this.#watchers.delete(collection);
     await this.allSettled();
   }
@@ -813,16 +814,20 @@ export default class FireStash extends AbstractFireStash {
   /**
    * Finish the last update and disconnect all watchers and timeouts.
    */
+  private deleted = false;
   async stop() {
+    if (this.deleted === true) { return; }
+    this.deleted = true;
     for (const [ key, unsubscribe ] of this.#watchers.entries()) {
       unsubscribe();
       this.#watchers.delete(key);
     }
     await this.allSettled();
-    this.level.close();
+    await this.level.close();
     await this.app.delete();
     this.timeout && clearTimeout(this.timeout as NodeJS.Timeout);
     this.timeout = null;
+    this.timeoutPromise = null;
   }
 
   // private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
@@ -1169,6 +1174,11 @@ export default class FireStash extends AbstractFireStash {
    * @param collection Collection Path
    */
   async update(collection: string, key: string, obj: object | null = null) {
+    // Ensure we're ready to trigger a remote update on next cycle.
+    const localPromise = this.timeoutPromise = this.timeoutPromise || new Promise((resolve, reject) => {
+      this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
+    });
+
     // Queue update for next remote data sync (1 per second)
     const keys = this.toUpdate.get(collection) || new Map();
     this.toUpdate.set(collection, keys);
@@ -1189,12 +1199,7 @@ export default class FireStash extends AbstractFireStash {
       }
     }
 
-    // Ensure we're ready to trigger a remote update on next cycle.
-    if (this.timeout) { return this.timeoutPromise; }
-    this.timeout = 1;
-    return this.timeoutPromise = this.timeoutPromise.then(() => new Promise((resolve, reject) => {
-      this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
-    }));
+    return localPromise;
   }
 
   /**
@@ -1202,6 +1207,11 @@ export default class FireStash extends AbstractFireStash {
    * @param collection Collection Path
    */
   async delete(collection: string, key: string) {
+    // Ensure we're ready to trigger a remote update on next cycle.
+    const localPromise = this.timeoutPromise = this.timeoutPromise || new Promise((resolve, reject) => {
+      this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
+    });
+
     // Queue update for next remote data sync (1 per second)
     const keys = this.toUpdate.get(collection) || new Map();
     this.toUpdate.set(collection, keys);
@@ -1221,11 +1231,7 @@ export default class FireStash extends AbstractFireStash {
     }
 
     // Ensure we're ready to trigger a remote update on next cycle.
-    if (this.timeout) { return this.timeoutPromise; }
-    this.timeout = 1;
-    return this.timeoutPromise = this.timeoutPromise.then(() => new Promise((resolve, reject) => {
-      this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
-    }));
+    return localPromise;
   }
 
   /**

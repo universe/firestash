@@ -1,4 +1,4 @@
-import FireStash, { IFireStash, FireStashOptions, ServiceAccount } from './lib';
+import FireStash, { IFireStash, FireStashOptions, ServiceAccount } from './lib.js';
 
 const [ credential, options, parentPid ]: [ ServiceAccount, FireStashOptions, number ] = [ JSON.parse(process.argv[2]), JSON.parse(process.argv[3]), parseInt(process.argv[4]) ];
 

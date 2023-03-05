@@ -1,12 +1,14 @@
-import FireStash from './lib';
+import 'dotenv/config';
 import * as path from 'path';
 import { assert } from 'chai';
-
 import { performance } from 'perf_hooks';
+import { fileURLToPath } from 'url';
 
-require('dotenv/config');
+import FireStash from './lib.js';
+
 
 const projectId = 'fire-stash';
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 async function run() {
   let appId = 0;

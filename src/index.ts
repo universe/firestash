@@ -2,9 +2,12 @@ import * as path from 'path';
 import { fork, ChildProcess } from 'child_process';
 import Firebase from 'firebase-admin';
 import { nanoid } from 'nanoid';
+import { fileURLToPath } from 'url';
 
-import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types';
-import { cacheKey } from './lib';
+import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
+import { cacheKey } from './lib.js';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
@@ -22,9 +25,8 @@ export default class FireStash extends AbstractFireStash {
     super(project, options);
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
-      [ JSON.stringify(project), JSON.stringify(options), String(process.pid) ],
-      // { execArgv: ['--inspect-brk=40894'] },
-      process.env.NODE_ENV !== 'production' ? { execArgv: ['--inspect=40894'] } : {},
+      [ JSON.stringify(project), JSON.stringify(options || {}), String(process.pid) ],
+      process.env.NODE_ENV === 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') {
