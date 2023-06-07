@@ -15,7 +15,7 @@ export type ServiceAccount = {
 };
 
 export interface FireStashOptions {
-  datastore: 'sqlite' | 'rocksdb' | 'leveldown' | 'memdown';
+  datastore: 'sqlite' | 'memdown';
   readOnly: boolean;
   lowMem: boolean;
   directory: string | null;
