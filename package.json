@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "main": "dist/src/index.js",
   "license": "MIT",
   "private": false,
@@ -8,10 +8,10 @@
   "scripts": {
     "build": "rm -rf dist && tsc --jsx preserve -p tsconfig.json",
     "pretest": "yarn run build",
-    "test": "firebase emulators:exec --ui 'yarn clean-mocha'",
+    "test": "FIREBASE_AUTH_EMULATOR_HOST=localhost:5050 firebase emulators:exec --ui 'yarn clean-mocha'",
     "lint": "eslint **/*.ts",
     "lint:fix": "eslint **/*.ts --fix",
-    "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test",
+    "mocha": "FIREBASE_AUTH_EMULATOR_HOST=localhost:5050 firebase emulators:exec --ui '0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test'",
     "clean-mocha": "mocha -r dotenv/config dist/test",
     "deploy": "NODE_ENV=production firebase deploy",
     "emulate": "firebase emulators:start"

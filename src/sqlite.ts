@@ -36,7 +36,9 @@ export default class LevelSQLite {
       fs.existsSync(`${this.path}-wal`) && fs.unlinkSync(`${this.path}-wal`);
       this.db = new SQLiteConstructor(this.path);
     }
-    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('journal_mode = OFF');
+    this.db.pragma('synchronous = OFF');
+    this.db.pragma('foreign_keys = 0');
     this.db.unsafeMode(true);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS store (
@@ -47,7 +49,7 @@ export default class LevelSQLite {
     `);
     this._get = this.db.prepare<[string]>('SELECT "value" FROM "store" WHERE "key" = ?').pluck();
     this._getAll = this.db.prepare<[string[]]>(`SELECT "key", "value" FROM "store" WHERE "key" IN (${new Array(100).fill('?').join(', ')})`);
-    this._put = this.db.prepare<{ key: string; value: Buffer; }>('INSERT INTO "store" ("key","value") VALUES (@key, @value) ON CONFLICT ("key") DO UPDATE SET "value" = @value;');
+    this._put = this.db.prepare<{ key: string; value: Buffer; }>(`INSERT INTO "store" ("key","value") VALUES (?, ?) ON CONFLICT ("key") DO UPDATE SET "value" = excluded.value;`);
     this._del = this.db.prepare<[string]>('DELETE FROM "store" WHERE "key" = ?');
     this._iteratorAsc = this.db.prepare(`
       SELECT "key" FROM "store"
@@ -70,7 +72,7 @@ export default class LevelSQLite {
   }
 
   async get(key: string, _options?: { asBuffer?: boolean }, cb?: (err: Error | undefined, value: Buffer | null) => void): Promise<Buffer | undefined> {
-    const res = this._get.get(key) || undefined;
+    const res = (this._get.get(key) as Buffer) || undefined;
     cb?.(undefined, res);
     return res;
   }
@@ -84,7 +86,7 @@ export default class LevelSQLite {
         data[idx] = keys[(page * 100) + idx];
         reverseLookup[keys[(page * 100) + idx]] = (page * 100) + idx;
       }
-      const res = this._getAll.all(data) || [];
+      const res = (this._getAll.all(data) as { key: string; value: string; }[]) || [];
       for (const obj of res) {
         out[reverseLookup[obj.key]] = obj.value || null;
       }
@@ -99,7 +101,7 @@ export default class LevelSQLite {
 
   async put(key: string, value: Buffer | string): Promise<void> {
     if (typeof value === 'string') { value = Buffer.from(value); }
-    this._put.run({ key, value });
+    this._put.run(key, value);
   }
 
   iterator(options?: {
@@ -113,9 +115,9 @@ export default class LevelSQLite {
     keyAsBuffer?: boolean;
     valueAsBuffer?: boolean;
   }): LevelSQLiteIterator {
-    const iter = options?.reverse === true
-      ? this._iteratorDesc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null })
-      : this._iteratorAsc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null });
+    const iter: IterableIterator<[string]> = options?.reverse === true
+      ? this._iteratorDesc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null }) as IterableIterator<[string]>
+      : this._iteratorAsc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null }) as IterableIterator<[string]>;
     return {
       next: (cb: (err: Error | undefined, id: [string] | undefined) => void) => {
         const value = iter.next().value as [string] | undefined;
@@ -134,13 +136,32 @@ export default class LevelSQLite {
     };
   }
 
+
+  #batch = false;
   batch(): LevelSQLiteBatch {
-    // this.db.exec('BEGIN TRANSACTION');
     return {
-      put: (key: string, value: Buffer | string) => this.put(key, value),
-      del: (key: string) => this.del(key),
+      put: (key: string, value: Buffer | string) => {
+        if (!this.#batch) {
+          this.db.exec('BEGIN TRANSACTION');
+          this.db.pragma('ignore_check_constraints = 1');
+          this.#batch = true;
+        }
+        this._put.run(key, value);
+      },
+      del: (key: string) => {
+        if (!this.#batch) {
+          this.db.exec('BEGIN TRANSACTION');
+          this.db.pragma('ignore_check_constraints = 1');
+          this.#batch = true;
+        }
+        this.del(key);
+      },
       write: () => {
-        // this.db.exec('COMMIT');
+        if (this.#batch) {
+          this.db.pragma('ignore_check_constraints = 0');
+          this.db.exec('COMMIT');
+          this.#batch = false;
+        }
         return Promise.resolve();
       },
     };
