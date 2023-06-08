@@ -1,7 +1,15 @@
-import Firebase from 'firebase/compat/app';
 import 'firebase/compat/auth';
 import 'firebase/compat/firestore';
+import type { FirebaseApp } from 'firebase/app';
+import type { Firestore } from 'firebase/firestore';
 import { EventEmitter } from 'events';
+
+// We base64 encode page keys to safely represent deep collections, who's paths contain '/', in a flat list.
+function encode(key: string) {
+  return Buffer.from(key).toString('base64').replace(/=/g, '').replace(/\//g, '.');
+}
+
+export function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
 
 export type ServiceAccount = {
   projectId: string;
@@ -34,8 +42,8 @@ const DEFAULT_OPTIONS: FireStashOptions = {
 };
 
 export interface IFireStash {
-  app: Firebase.app.App;
-  db: Firebase.firestore.Firestore;
+  app: FirebaseApp;
+  db: Firestore;
   cacheKey(collection: string, page: number): string;
   watchers(): Promise<string[]>;
   allSettled(): Promise<void>;
@@ -67,9 +75,8 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
   protected project: ServiceAccount;
   protected options: FireStashOptions = { ...DEFAULT_OPTIONS };
 
-  public readonly abstract app: Firebase.app.App;
-  public readonly abstract db: Firebase.firestore.Firestore;
-  public readonly abstract firebase: typeof Firebase;
+  public readonly abstract app: FirebaseApp;
+  public readonly abstract db: Firestore;
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.

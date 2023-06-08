@@ -3,11 +3,14 @@ import { fork, ChildProcess } from 'child_process';
 import Firebase from 'firebase/compat/app';
 import 'firebase/compat/auth';
 import 'firebase/compat/firestore';
+import { FirebaseApp, initializeApp } from 'firebase/app';
+import { Firestore, initializeFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 
-import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
-import { cacheKey } from './lib.js';
+import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
+
+export { cacheKey }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,16 +22,17 @@ export default class FireStash extends AbstractFireStash {
   #iterators: Record<number, [(res: { value: [string, any | null]; done: boolean }) => any, (val: any) => void]> = {};
   #listeners: Record<string, (snapshot?: unknown) => any> = {};
 
-  app: Firebase.app.App;
-  db: Firebase.firestore.Firestore;
+  app: FirebaseApp;
+  db: Firestore;
   firebase: typeof Firebase;
 
   constructor(config: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
     super(config, options);
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
-      [ JSON.stringify(config), JSON.stringify(options), String(process.pid) ],
-      process.env.NODE_ENV !== 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
+      [ JSON.stringify(config || {}), JSON.stringify(options || {}), String(process.pid) ],
+      // process.env.NODE_ENV !== 'development' ? { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], } : { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], },
+      process.env.NODE_ENV !== 'development' ? { serialization: 'advanced' } : { serialization: 'advanced' },
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') {
@@ -49,18 +53,23 @@ export default class FireStash extends AbstractFireStash {
     // Start our own firebase connection for in-process access.
     // const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
     this.firebase = Firebase;
-    this.app = Firebase.initializeApp(config, `${config.projectId}-firestash-${nanoid()}`);
-    this.db = this.app.firestore();
-    this.db.useEmulator('localhost', 5050);
+    this.app = initializeApp(config, `${config.projectId}-firestash-${nanoid()}`);
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
-    this.db.settings({ ignoreUndefinedProperties: true, merge: true });
+    this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
+    connectFirestoreEmulator(this.db, 'localhost', 5050);
 
     // Ensure we don't leave zombies around.
-    process.on('exit', () => this.#worker.kill());
-    process.on('SIGHUP', () => this.#worker.kill());
-    process.on('SIGINT', () => this.#worker.kill());
-    process.on('SIGTERM', () => this.#worker.kill());
+    this.ensureWorkerKilled = this.ensureWorkerKilled.bind(this);
+    process.on('exit', this.ensureWorkerKilled);
+    process.on('SIGHUP', this.ensureWorkerKilled);
+    process.on('SIGINT', this.ensureWorkerKilled);
+    process.on('SIGTERM', this.ensureWorkerKilled);
+  }
+
+  // Pulled out to a method so we can un-bind on FireStash.stop()
+  private ensureWorkerKilled() {
+    this.#worker.kill('SIGINT');
   }
 
   private async runInWorker<M extends Exclude<keyof IFireStash, 'db' | 'app'>>(
@@ -97,7 +106,14 @@ export default class FireStash extends AbstractFireStash {
 
   public watchers() { return this.runInWorker([ 'watchers', []]); }
   public unwatch(collection: string): Promise<void> { return this.runInWorker([ 'unwatch', [collection]]); }
-  public stop(): Promise<void> { return this.runInWorker([ 'stop', []]); }
+  public async stop(): Promise<void> {
+    await this.runInWorker([ 'stop', []]);
+    process.off('exit', this.ensureWorkerKilled);
+    process.off('SIGHUP', this.ensureWorkerKilled);
+    process.off('SIGINT', this.ensureWorkerKilled);
+    process.off('SIGTERM', this.ensureWorkerKilled);
+    this.ensureWorkerKilled();
+  }
 
   async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
     let val: { value: [string, T | null]; done: boolean } = { value: [ '', null ], done: false };

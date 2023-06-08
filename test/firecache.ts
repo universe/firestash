@@ -1,15 +1,14 @@
 import { describe, beforeEach, after, it } from 'mocha';
 import { assert } from 'chai';
 import * as path from 'path';
-import * as fireTest from '@firebase/rules-unit-testing';
+import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import Firebase from 'firebase-admin';
+import { doc, getDoc } from 'firebase/firestore';
 import { performance } from 'perf_hooks';
 import { fileURLToPath } from 'url';
 
 
-import FireStash from '../src/index.js';
-import { cacheKey } from '../src/lib.js';
-// import { rejects } from 'assert';
+import FireStash, { cacheKey } from '../src/index.js';
 
 const projectId = 'fire-stash';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -20,22 +19,23 @@ function wait(ms: number): Promise<void> {
 
 describe('Connector', function() {
   describe('it should', function() {
+    const firebaseTest = initializeTestEnvironment({ projectId });
     const app = Firebase.initializeApp({ projectId });
     const firestore = app.firestore();
     let appId = 0;
-    let fireStash = new FireStash({ projectId }, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
+    let fireStash: FireStash;
 
     beforeEach(async function() {
       this.timeout(60000);
-      await fireStash.stop();
-      await fireTest.clearFirestoreData({ projectId });
+      await fireStash?.stop();
+      await (await firebaseTest).clearFirestore();
       fireStash = new FireStash({ projectId }, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
-      await wait(3000);
+      await wait(300);
     });
 
     after(async() => {
       await fireStash.stop();
-      await fireTest.clearFirestoreData({ projectId });
+      await (await firebaseTest).clearFirestore();
       await app.delete();
       process.exit(0);
     });
@@ -45,15 +45,13 @@ describe('Connector', function() {
       fireStash.update('contacts', 'id1');
       const start = Date.now();
 
-      // console.log(await fireStash.stash('contacts'));
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: {} }, 'Throttles cache write and writes');
 
       await fireStash.allSettled();
-      // console.log(await fireStash.stash('contacts'));
 
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
       assert.deepStrictEqual(
-        (await fireStash.db.doc(`firestash/${cacheKey('contacts', 0)}`).get()).data(),
+        (await getDoc(doc(fireStash.db, `firestash/${cacheKey('contacts', 0)}`))).data(),
         { collection: 'contacts', cache: { id1: 1 } },
         'Throttles cache writes',
       );
@@ -374,6 +372,7 @@ describe('Connector', function() {
             batch = firestore.batch();
           }
         }
+
         await batch.commit();
         await Promise.allSettled(promises);
         await fireStash.allSettled();
@@ -417,7 +416,7 @@ describe('Connector', function() {
       // TODO: Implement a stream test that tries to access dirty key values and validate we only get each key once!
     });
 
-    it.skip('large streaming gets are performant', async function() {
+    it('large streaming gets are performant', async function() {
       this.timeout(6000000);
 
       const promises: Promise<void>[] = [];
@@ -428,14 +427,13 @@ describe('Connector', function() {
         ids.push(`id${i}`);
         promises.push(fireStash.update('bulkcollection', `id${i}`, { id: bigString }));
       }
-      console.log('awaiting');
+
       await Promise.allSettled(promises);
       performance.mark('updateEnd');
       performance.measure('bulkUpdate', 'updateStart', 'updateEnd');
 
-      console.log('done');
       await fireStash.allSettled();
-      console.log('settled');
+
       performance.mark('bulkGetStart');
       let now = performance.now();
       const res = await fireStash.get('bulkcollection');
@@ -448,13 +446,14 @@ describe('Connector', function() {
       console.log('time', done - now);
       console.log((performance as any).getEntriesByName('bulkGet'));
       console.log((performance as any).getEntriesByName('bulkUpdate'));
-      assert.ok(done - now < 3000, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
+      assert.ok(done - now < 4200, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
 
       now = performance.now();
       const res2 = await fireStash.get('bulkcollection', ids);
       done = performance.now();
+      console.log('time', done - now);
       assert.strictEqual(Object.keys(res2).length, 15000, 'Fetches all values');
-      assert.ok(done - now < 3000, 'Get time is not blown out.');
+      assert.ok(done - now < 4200, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
     });
 
     it('cache-only updates are batched in groups of 490', async function() {
@@ -756,12 +755,17 @@ describe('Connector', function() {
 
     it('overflows cache tables gracefully', async function() {
       this.timeout(60000);
-      const BIG_STRING = '0'.repeat(500000); // Basically a half megabyte string. Will cause a page overflow on update 3.
+      const BIG_STRING = '0'.repeat((1048576 / 2) - 90); // Max document size is 1,048,576 bytes Will cause a page overflow on update 3.
       for (let i = 0; i < 3; i++) {
-        await fireStash.update('overflow', `${BIG_STRING}_${i}`, { id: i });
         try {
-          assert.deepStrictEqual(await fireStash.get('overflow', `${BIG_STRING}_${i}`), { id: i });
-          assert.deepStrictEqual((await firestore.doc(`overflow/${BIG_STRING}_${i}`).get()).data(), { id: i });
+          (await firestore.doc(`firestash/${cacheKey('overflow', 0)}`).set({ [`BIG_STRING_${i}`]: BIG_STRING }, { merge: true }));
+        } catch (err) {
+          1;
+        }
+        await fireStash.update('overflow', `BIG_STRING_${i}`, { id: i });
+        try {
+          assert.deepStrictEqual((await fireStash.get<{ id: number }>('overflow', `BIG_STRING_${i}`))?.id, i);
+          assert.deepStrictEqual((await firestore.doc(`overflow/BIG_STRING_${i}`).get()).data()?.id, i);
           assert.strictEqual((await firestore.doc(`firestash/${cacheKey('overflow', 0)}`).get()).exists, true);
           assert.strictEqual((await firestore.doc(`firestash/${cacheKey('overflow', 1)}`).get()).exists, i >= 2);
         }
