@@ -12,7 +12,8 @@ import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptio
 
 export { cacheKey }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const IS_DEV = process.env.NODE_ENV !== 'production';
 
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
@@ -31,8 +32,8 @@ export default class FireStash extends AbstractFireStash {
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
       [ JSON.stringify(config || {}), JSON.stringify(options || {}), String(process.pid) ],
-      // process.env.NODE_ENV !== 'development' ? { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], } : { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], },
-      process.env.NODE_ENV !== 'development' ? { serialization: 'advanced' } : { serialization: 'advanced' },
+      // IS_DEV ? { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], } : { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], },
+      IS_DEV ? { serialization: 'advanced' } : { serialization: 'advanced' },
     );
     this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
       if (type === 'method') {
@@ -57,7 +58,11 @@ export default class FireStash extends AbstractFireStash {
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
-    connectFirestoreEmulator(this.db, 'localhost', 5050);
+    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectFirestoreEmulator(
+      this.db,
+      process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
+      parseInt(process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
+    );
 
     // Ensure we don't leave zombies around.
     this.ensureWorkerKilled = this.ensureWorkerKilled.bind(this);

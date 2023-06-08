@@ -38,6 +38,7 @@ import { deleteApp } from 'firebase-admin/app';
 
 export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 
+const IS_DEV = process.env.NODE_ENV !== 'production';
 const GET_PAGINATION_SIZE = 100;
 
 declare global {
@@ -130,7 +131,11 @@ export default class FireStash extends AbstractFireStash {
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
-    connectFirestoreEmulator(this.db, 'localhost', 5050);
+    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectFirestoreEmulator(
+      this.db,
+      process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
+      parseInt(process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
+    );
     this.dir = this.options?.directory || null;
     this.log = console;
 
