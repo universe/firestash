@@ -22,7 +22,7 @@ import {
   QuerySnapshot,
   DocumentData,
 } from 'firebase/firestore';
-import { FirebaseApp, initializeApp } from 'firebase/app';
+import { FirebaseApp, initializeApp, deleteApp } from 'firebase/app';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -34,12 +34,8 @@ import MemDown from 'memdown';
 
 import LevelSQLite from './sqlite.js';
 import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
-import { deleteApp } from 'firebase-admin/app';
 
 export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
-
-const IS_DEV = process.env.NODE_ENV !== 'production';
-const GET_PAGINATION_SIZE = 100;
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -58,9 +54,12 @@ declare global {
 
 // Maximum payload size for Firestore is 11,534,336 bytes (11.5MB).
 // Maximum document size is 1MB. Worst case: 10 documents are safe to send at a time.
+// Batches max out at 500 changes per request. We do slightly lower to ensure the write.
+// Optimal read page sizes set after testing.
 const MAX_BATCH_SIZE = 10;
 const MAX_UPDATE_SIZE = 490;
-const MAX_READ_SIZE = 500;
+const MAX_READ_SIZE = 10;
+const GET_PAGINATION_SIZE = 100;
 const DELETE_RECORD = Symbol('firestash-delete');
 
 interface ThrottledSnapshot {
@@ -215,6 +214,7 @@ export default class FireStash extends AbstractFireStash {
    * Called once per second when there are updated queued. Writes all changes to remote stash cache.
    */
   private async saveCacheUpdate() {
+
     // Wait for our local events queue to finish before syncing remote.
     await this.drainEventsPromise;
     this.timeout = null;
@@ -483,6 +483,7 @@ export default class FireStash extends AbstractFireStash {
         }
         batch.set(doc(this.db, 'firestash', pageId), batchUpdates[pageId], { merge: true });
       }
+
       await commitPage(batch, batchUpdates);
 
       this.emit('save');
@@ -853,39 +854,27 @@ export default class FireStash extends AbstractFireStash {
     // You'll get most of the object very quickly, but some may take a second request.
     while (idSet.size && requestPageSize > 1) {
       const ids = [...idSet];
-      this.log.info(`[FireCache] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
-      const promises: Promise<DocumentSnapshot<T>>[] = [];
-
-      for (const id of idSet) {
-        promises.push(getDoc(doc(this.db, collection, id)) as unknown as Promise<DocumentSnapshot<T>>);
-      }
+      this.log.info(`[FireStash] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
 
       for (let i = 0; i < Math.ceil(ids.length / requestPageSize); i++) {
-        // this.log.info(`[FireCache] Fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
-        [...ids.slice(i * requestPageSize, (i + 1) * requestPageSize)].map((id) => {
+        // this.log.info(`[FireStash] Fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
+        const resolutions = await Promise.allSettled([...ids.slice(i * requestPageSize, (i + 1) * requestPageSize)].map((id) => {
           this.emit('fetch', collection, id);
-          promises.push(getDoc(doc(this.db, collection, id)) as unknown as Promise<DocumentSnapshot<T>>);
-        })
-        // Force get serialization since grpc can panic with too many open connections.
-        // try { await p; }
-        // catch { /* Rejection appropriately handled later. */ }
-        // this.log.info(`[FireCache] Done fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
-      }
-
-      const resolutions = await Promise.allSettled(promises);
-
-      for (let i = 0; i < resolutions.length; i++) {
-        const res = resolutions[i];
-        if (res.status === 'fulfilled') {
-          documents.push(res.value);
-          idSet.delete(res.value.id);
+          return getDoc(doc(this.db, collection, id)) as unknown as Promise<DocumentSnapshot<T>>;
+        }));
+        for (let i = 0; i < resolutions.length; i++) {
+          const res = resolutions[i];
+          if (res.status === 'fulfilled') {
+            documents.push(res.value);
+            idSet.delete(res.value.id);
+          }
         }
       }
 
       requestPageSize = Math.round(requestPageSize / 3); // With this magic math, we get up to 6 tries to get this right!
       missCount += 1;
     }
-    this.log.info(`[FireCache] Finished fetching ${documents.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+    this.log.info(`[FireStash] Finished fetching ${documents.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
 
     return documents as DocumentSnapshot<T>[];
   }
