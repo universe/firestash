@@ -1,5 +1,7 @@
+import 'dotenv/config';
+
 import { describe, beforeEach, after, it } from 'mocha';
-import { assert } from 'chai';
+import * as assert from 'assert';
 import * as path from 'path';
 import SQLite from '../src/sqlite.js';
 import { fileURLToPath } from 'url';
@@ -19,7 +21,6 @@ describe('Connector', function() {
 
     after(async() => {
       db.close();
-      process.exit(0);
     });
 
     it('is able to insert and read a key', async function() {

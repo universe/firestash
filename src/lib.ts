@@ -1,5 +1,3 @@
-import 'firebase/compat/auth';
-import 'firebase/compat/firestore';
 import { 
   Firestore, 
   DocumentSnapshot, 
@@ -23,6 +21,7 @@ import {
   DocumentData,
 } from 'firebase/firestore';
 import { FirebaseApp, initializeApp, deleteApp } from 'firebase/app';
+import { Auth, getAuth, signInWithCustomToken, connectAuthEmulator } from 'firebase/auth';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -31,11 +30,12 @@ import { nanoid } from 'nanoid';
 // import * as LRU from 'lru-cache';
 import LevelUp from 'levelup';
 import MemDown from 'memdown';
+import { isMainThread } from 'worker_threads';
 
 import LevelSQLite from './sqlite.js';
-import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
+import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig } from './types.js';
 
-export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
+export type { IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig };
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -106,12 +106,14 @@ function ensureFirebaseSafe(obj: any, depth = 0): void {
 }
 
 export default class FireStash extends AbstractFireStash {
-  toUpdate: Map<string, Map<string, (object | typeof DELETE_RECORD | null)[]>> = new Map();
   app: FirebaseApp;
   db: Firestore;
+  auth: Auth;
+  private authPromise: Promise<void> | null = null;
   dir: string | null;
   log: typeof console;
   #watchers: Map<string, () => void> = new Map();
+  toUpdate: Map<string, Map<string, (object | typeof DELETE_RECORD | null)[]>> = new Map();
   timeout: NodeJS.Timeout | number | null = null;
   timeoutPromise: Promise<void> | null = null;
   level: LevelUp.LevelUp | LevelSQLite;
@@ -123,20 +125,27 @@ export default class FireStash extends AbstractFireStash {
    * @param app The Firebase App Instance.
    * @param directory The cache backup directory (optional)
    */
-  constructor(config: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
+  constructor(config: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super(config, options);
     // const config = await (await window.fetch(`https://${pid}.firebaseapp.com/__/firebase/init.json`)).json();
     this.app = initializeApp(config, `${config.projectId}-firestash-${nanoid()}`);
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
-    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectFirestoreEmulator(
+    process.env.FIRESTORE_EMULATOR_HOST && connectFirestoreEmulator(
       this.db,
-      process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
-      parseInt(process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
+      process.env.FIRESTORE_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
+      parseInt(process.env.FIRESTORE_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
     );
     this.dir = this.options?.directory || null;
     this.log = console;
+
+    // If a custom token was provided, sign the user in. Intentional fire and forget here.
+    this.auth = getAuth(this.app);
+    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectAuthEmulator(this.auth, `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`);
+    if (options?.customToken) {
+      this.authPromise = signInWithCustomToken(this.auth, options.customToken).then(() => { this.authPromise = null; });
+    }
 
     // Clean up after ourselves if the process exits.
     this.stop = this.stop.bind(this);
@@ -159,14 +168,17 @@ export default class FireStash extends AbstractFireStash {
     this.level._nextTick = setImmediate;
   }
 
-  cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
+  public cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
 
-  async watchers() { return [...new Set(this.#watchers.keys())]; }
+  public async watchers() { return [...new Set(this.#watchers.keys())]; }
 
   /**
    * Resolves when all previously called updates are written to remote. Like requestAnimationFrame for the collection cache.
    */
-  allSettled() { return this.timeoutPromise || Promise.resolve(); }
+  public async allSettled() { 
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+    return this.timeoutPromise || Promise.resolve(); 
+  }
 
   private stashPagesMemo: Record<string, Record<string, IFireStashPage | undefined>> = {};
   private async stashPages(collectionName: string): Promise<Record<string, IFireStashPage | undefined>> {
@@ -193,7 +205,9 @@ export default class FireStash extends AbstractFireStash {
    * @param collection Collection Path
    */
   private stashMemo: Record<string, IFireStashPage> = {};
-  async stash(collection: string): Promise<IFireStashPage> {
+  public async stash(collection: string): Promise<IFireStashPage> {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     if (!this.options.lowMem && this.stashMemo[collection]) { return this.stashMemo[collection]; }
 
     const pages = await this.stashPages(collection);
@@ -431,6 +445,9 @@ export default class FireStash extends AbstractFireStash {
         else if (err.message === 'cannot have more than 500 field transforms on a single document') {
           this.log.error('Excess Content Transforms Detected');
         }
+        else if (err.code === 'permission-denied') {
+          throw err;
+        }
         else {
           this.log.error(err);
         }
@@ -457,9 +474,12 @@ export default class FireStash extends AbstractFireStash {
               }
             }
           }
-          if (err.message === 'cannot have more than 500 field transforms on a single document') {
+          else if (err.message === 'cannot have more than 500 field transforms on a single document') {
             this.log.error('Excess Cache Key Transforms Detected');
             this.log.log(updates);
+          }
+          else if (err.code === 'permission-denied') {
+            throw err;
           }
         }
       };
@@ -505,6 +525,9 @@ export default class FireStash extends AbstractFireStash {
       this.emit('settled');
     }
     catch (err) {
+      if (err.code === 'permission-denied') {
+        throw err;
+      }
       this.log.error(`[FireStash] Error persisting ${promises.length} FireStash data updates.`, err);
     }
 
@@ -652,11 +675,13 @@ export default class FireStash extends AbstractFireStash {
     }
   }
 
-  async onSnapshot<D = any>(
+  public async onSnapshot<D = any>(
     documentPath: string,
     callback: (snapshot?: D) => any,
     timeout = 1000,
   ): Promise<() => void> {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     return new Promise((resolve, reject) => {
       const unsubscribe = this.unsubscribe.bind(this, documentPath, callback);
 
@@ -694,7 +719,9 @@ export default class FireStash extends AbstractFireStash {
    * @param collectionName Collection Path
    */
   private watcherStarters: Record<string, undefined | true | Promise<() => void> | undefined> = {};
-  async watch(collectionName: string): Promise<() => void> {
+  public async watch(collectionName: string): Promise<() => void> {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // If we call this function on repeat, make sure we wait for the first call to be resolve.
     if (this.watcherStarters[collectionName]) { await this.watcherStarters[collectionName]; }
 
@@ -798,7 +825,7 @@ export default class FireStash extends AbstractFireStash {
   /**
    * Finish the last update and disconnect all watchers and timeouts.
    */
-  async unwatch(collection: string) {
+  public async unwatch(collection: string) {
     this.#watchers.get(collection)?.();
     this.#watchers.delete(collection);
     await this.allSettled();
@@ -808,7 +835,7 @@ export default class FireStash extends AbstractFireStash {
    * Finish the last update and disconnect all watchers and timeouts.
    */
   private deleted = false;
-  async stop() {
+  public async stop() {
     if (this.deleted === true) { return; }
     this.deleted = true;
     process.off('exit', () => this.stop);
@@ -827,7 +854,7 @@ export default class FireStash extends AbstractFireStash {
     this.timeoutPromise = null;
 
     // Exit must be called at the end of the call stack to allow `runInWorker` to resolve for the parent process.
-    setTimeout(() => process.exit(0), 1000)
+    !isMainThread && setTimeout(() => process.exit(0), 1000)
   }
 
   // private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
@@ -886,7 +913,8 @@ export default class FireStash extends AbstractFireStash {
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
    */
-  async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
+  public async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
     const idArr = id ? (Array.isArray(id) ? id : [id]) : [] as string[];
     const ids = new Set(idArr.map(id => `${collection}/${id}`));
     const toGet: string[] = [...ids];
@@ -1004,11 +1032,12 @@ export default class FireStash extends AbstractFireStash {
    * @param collection Collection Path
    */
   /* eslint-disable no-dupe-class-members */
-  async get<T=object>(collection: string): Promise<Record<string, T | null>>;
-  async get<T=object>(collection: string, id: string): Promise<T | null>;
-  async get<T=object>(collection: string, id: string[]): Promise<Record<string, T | null>>;
-  async get<T=object>(collection: string, id?: string | string[]): Promise<Record<string, T | null> | T | null> {
+  public async get<T=object>(collection: string): Promise<Record<string, T | null>>;
+  public async get<T=object>(collection: string, id: string): Promise<T | null>;
+  public async get<T=object>(collection: string, id: string[]): Promise<Record<string, T | null>>;
+  public async get<T=object>(collection: string, id?: string | string[]): Promise<Record<string, T | null> | T | null> {
   /* eslint-enable no-dupe-class-members */
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
     const idArr = id ? (Array.isArray(id) ? id : [id]) : [] as string[];
     const ids = new Set(idArr.map(id => `${collection}/${id}`));
     const toGet: string[] = [...ids];
@@ -1158,7 +1187,9 @@ export default class FireStash extends AbstractFireStash {
    * Increment a single document's generation cache key. Syncs to remote once per second.
    * @param collection Collection Path
    */
-  async update(collection: string, key: string, obj: object | null = null) {
+  public async update(collection: string, key: string, obj: object | null = null) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // Ensure we're ready to trigger a remote update on next cycle.
     const localPromise = this.timeoutPromise = this.timeoutPromise || new Promise((resolve, reject) => {
       this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
@@ -1191,7 +1222,9 @@ export default class FireStash extends AbstractFireStash {
    * Increment a single document's generation cache key. Syncs to remote once per second.
    * @param collection Collection Path
    */
-  async delete(collection: string, key: string) {
+  public async delete(collection: string, key: string) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // Ensure we're ready to trigger a remote update on next cycle.
     const localPromise = this.timeoutPromise = this.timeoutPromise || new Promise((resolve, reject) => {
       this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 1000);
@@ -1223,7 +1256,9 @@ export default class FireStash extends AbstractFireStash {
    * Bust all existing cache keys by incrementing by one.
    * @param collection Collection Path
    */
-  async bust(collection: string, key?: string) {
+  public async bust(collection: string, key?: string) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // Ensure we are watching for remote updates.
     await this.watch(collection);
     if (key) {
@@ -1245,7 +1280,9 @@ export default class FireStash extends AbstractFireStash {
    * Destroys any record of the collection in the stash.
    * @param collectionName Collection Path
    */
-  async purge(collectionName: string) {
+  public async purge(collectionName: string) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // Ensure we are watching for remote updates.
     const pages = await getDocs(query(collection(this.db, 'firestash'), where('collection', '==', collectionName)));
     const localPages = await this.stashPages(collectionName);
@@ -1273,7 +1310,9 @@ export default class FireStash extends AbstractFireStash {
    * Ensure all documents in the collection are present in the cache. Will not update existing cache keys.
    * @param collectionName Collection Path
    */
-  async ensure(collectionName: string, key?: string) {
+  public async ensure(collectionName: string, key?: string) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     // Ensure we are watching for remote updates.
     await this.watch(collectionName);
     if (key) {
@@ -1295,7 +1334,9 @@ export default class FireStash extends AbstractFireStash {
    * Balance the distribution of cache keys between all available pages.
    * @param collection Collection Path
    */
-  async balance(collection: string) {
+  public async balance(collection: string) {
+    this.authPromise && await (this.authPromise = this.authPromise.then(()=>{}));
+
     const remote = await this.stashPages(collection);
 
     let recordCount = 0;

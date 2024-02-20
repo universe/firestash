@@ -1,12 +1,11 @@
 import 'dotenv/config';
 
 import * as path from 'path';
-import { assert } from 'chai';
+import * as assert from 'assert';
 import { performance } from 'perf_hooks';
 import { fileURLToPath } from 'url';
 
-import FireStash from './lib.js';
-
+import FireStash from '../src/lib.js';
 
 const projectId = 'fire-stash';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));

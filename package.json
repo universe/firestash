@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "5.0.0",
+  "version": "5.0.0-beta.0",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "license": "MIT",
@@ -9,11 +9,11 @@
   "scripts": {
     "build": "rm -rf dist && tsc --jsx preserve -p tsconfig.json",
     "pretest": "yarn run build",
-    "test": "FIREBASE_AUTH_EMULATOR_HOST=localhost:5050 firebase emulators:exec --ui 'yarn clean-mocha'",
+    "test": "firebase emulators:exec --ui 'yarn clean-mocha'",
     "lint": "eslint **/*.ts",
     "lint:fix": "eslint **/*.ts --fix",
     "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test/sqlite.js",
-    "clean-mocha": "mocha -r dotenv/config dist/test",
+    "clean-mocha": "mocha --exit -r dotenv/config dist/test/*.test.js",
     "deploy": "NODE_ENV=production firebase deploy",
     "emulate": "firebase emulators:start"
   },
@@ -39,8 +39,8 @@
   },
   "peerDependencies": {
     "better-sqlite3": "^9.4.3",
-    "firebase-admin": "*",
     "firebase": "~10.6.0",
+    "leveldown": "^6.1.1",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
@@ -61,7 +61,8 @@
     "0x": "^5.1.2",
     "better-sqlite3": "^9.4.3",
     "chai": "^4.3.4",
-    "dotenv": "^8.0.0",
+    "dotenv": "^16.4.4",
+    "eslint": "8.35.0",
     "eslint-config-standard-preact": "^1.1.6",
     "eslint-config-standard": "^16.0.3",
     "eslint-plugin-import": "^2.26.0",
@@ -69,9 +70,8 @@
     "eslint-plugin-promise": "^6.0.0",
     "eslint-plugin-react": "^7.29.4",
     "eslint-plugin-standard": "^4.0.1",
-    "eslint": "8.35.0",
-    "firebase-admin": "^11.11.1",
     "firebase": "~10.6.0",
+    "firebase-admin": "^12.0.0",
     "firebase-tools": "^12.3.1",
     "husky": "^8.0.3",
     "isomorphic-fetch": "^3.0.0",

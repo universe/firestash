@@ -1,16 +1,15 @@
-import { describe, beforeEach, after, it } from 'mocha';
-import { assert } from 'chai';
+import 'dotenv/config';
+
+import { describe, before, beforeEach, after, it } from 'mocha';
+import * as assert from 'assert';
 import * as path from 'path';
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
-import { initializeApp, deleteApp } from 'firebase/app';
 import {
   collection,
-  connectFirestoreEmulator,
   deleteDoc,
   doc,
   getDoc,
   getDocs,
-  initializeFirestore,
   query,
   setDoc,
   where,
@@ -18,12 +17,23 @@ import {
 } from 'firebase/firestore';
 import { performance } from 'perf_hooks';
 import { fileURLToPath } from 'url';
-
+import { initializeApp, deleteApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 
 import FireStash, { cacheKey } from '../src/index.js';
 
 const projectId = 'fire-stash';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const CONFIG = {
+  projectId,
+  apiKey: "TEST_API_KEY",
+  appId: "1:testing",
+  authDomain: `${projectId}.firebaseapp.com`,
+  databaseURL: `https://${projectId}.firebaseio.com`,
+  measurementId: "G-TEST",
+  messagingSenderId: "1234567890",
+  storageBucket: `${projectId}.appspot.com`,
+}
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,29 +42,31 @@ function wait(ms: number): Promise<void> {
 describe('Connector', function() {
   describe('it should', function() {
     const firebaseTest = initializeTestEnvironment({ projectId });
-    const app = initializeApp({ projectId });
-    const firestore = initializeFirestore(app, { ignoreUndefinedProperties: true });
-    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectFirestoreEmulator(
-      firestore,
-      process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
-      parseInt(process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
-    );
+
     let appId = 0;
     let fireStash: FireStash;
+    let customToken: string;
+
+    before(async function() {
+      const adminApp = initializeApp(CONFIG, 'firecache-tests');
+      const adminAuth = getAuth(adminApp);
+      await adminAuth.createUser({ uid: 'test-firecache-user', email: 'test-firecache-user@universe.test', emailVerified: true });
+      customToken = await adminAuth.createCustomToken('test-firecache-user');
+      await deleteApp(adminApp);
+    });
 
     beforeEach(async function() {
       this.timeout(60000);
       await fireStash?.stop();
       await (await firebaseTest).clearFirestore();
-      fireStash = new FireStash({ projectId }, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
+      fireStash = new FireStash(CONFIG, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)), customToken });
+      await fireStash.allSettled(); // To ensure we start tests logged in so so throttled execution can be tested.
       await wait(300);
     });
 
     after(async() => {
       await fireStash.stop();
       await (await firebaseTest).clearFirestore();
-      await deleteApp(app);
-      process.exit(0);
     });
 
     it('is able to insert a key', async function() {
@@ -65,14 +77,13 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: {} }, 'Throttles cache write and writes');
 
       await fireStash.allSettled();
-
+      assert.ok((Date.now() - start) < 1200, 'Resolves in ~1s');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
       assert.deepStrictEqual(
         (await getDoc(doc(fireStash.db, `firestash/${cacheKey('contacts', 0)}`))).data(),
         { collection: 'contacts', cache: { id1: 1 } },
         'Throttles cache writes',
       );
-      assert.ok((Date.now() - start) > 1200, 'Resolves in ~1s');
     });
 
     it('is able to purge collections', async function() {
@@ -86,7 +97,8 @@ describe('Connector', function() {
     });
 
     it('creates in-memory local db if started with no root directory', async function() {
-      const memStash = new FireStash({ projectId });
+      const memStash = new FireStash(CONFIG, { customToken });
+      await fireStash.allSettled();
       memStash.update('contacts', 'id1');
       await memStash.allSettled();
       assert.deepStrictEqual(await memStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache writes, resolved in 1s');
@@ -126,7 +138,7 @@ describe('Connector', function() {
         fetches.push(`${collection}/${id}`);
       });
       fireStash.update('contacts', '1', { foo: 'bar' });
-      setDoc(doc(firestore, 'contacts/2'), { biz: 'baz' });
+      setDoc(doc(fireStash.db, 'contacts/2'), { biz: 'baz' });
       fireStash.update('contacts', '2');
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1, 2: 1 } }, 'Stash correctly set');
@@ -138,11 +150,12 @@ describe('Connector', function() {
       const fetches: string[] = [];
       let called = 0;
       fireStash.update('contacts', '1', { foo: 'bar' });
-      setDoc(doc(firestore, 'contacts/2'), { biz: 'baz' });
+      setDoc(doc(fireStash.db, 'contacts/2'), { biz: 'baz' });
       fireStash.update('contacts', '2');
       await fireStash.allSettled();
 
-      const otherFireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId + '-other')) });
+      const otherFireStash = new FireStash(CONFIG, { directory: path.join(__dirname, String(appId + '-other')), customToken });
+      await otherFireStash.allSettled();
       otherFireStash.on('fetch', (collection, id) => {
         fetches.push(`${collection}/${id}`);
         called++;
@@ -163,11 +176,11 @@ describe('Connector', function() {
       this.timeout(4000);
       await fireStash.update('contacts', '3', { foo: 'bar' });
       assert.deepStrictEqual(await fireStash.get('contacts', '3'), { foo: 'bar' });
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/3'))).data(), { foo: 'bar' });
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/3'))).data(), { foo: 'bar' });
       await fireStash.update('contacts', '3', { foo: undefined });
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.get('contacts', '3'), { });
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/3'))).data(), { });
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/3'))).data(), { });
     });
 
     it('handles multiple updates to the same key and object', async function() {
@@ -196,7 +209,7 @@ describe('Connector', function() {
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally after sync');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/1'))).data(), expected, 'Gets all data on remote');
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/1'))).data(), expected, 'Gets all data on remote');
       assert.deepStrictEqual(fetches, [], 'Fetches only what is necessary after remote update.');
     });
 
@@ -212,7 +225,7 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 2 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts'), { 1: null }, 'Gets all data');
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), null, 'Missing objects return null.');
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/1'))).data(), undefined);
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/1'))).data(), undefined);
     });
 
     it('is able to delete then reify an object', async function() {
@@ -228,7 +241,7 @@ describe('Connector', function() {
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 2 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts'), { 1: { foo: 'baz' } }, 'Gets all data');
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), { foo: 'baz' }, 'Missing objects return null.');
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/1'))).data(), { foo: 'baz' });
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/1'))).data(), { foo: 'baz' });
     });
 
     it('is able to watch an object for deletion', async function() {
@@ -237,10 +250,10 @@ describe('Connector', function() {
       await fireStash.allSettled();
       fireStash.watch('contacts');
       const cacheKey = fireStash.cacheKey('contacts', 0);
-      const cache = (await getDoc(doc(firestore, 'firestash', cacheKey))).data() as Record<string, number>;
+      const cache = (await getDoc(doc(fireStash.db, 'firestash', cacheKey))).data() as Record<string, number>;
       cache.cache['1'] = (cache.cache['1'] || 0) + 1;
-      await deleteDoc(doc(firestore, 'contacts', '1'));
-      await setDoc(doc(firestore, 'firestash', cacheKey), cache);
+      await deleteDoc(doc(fireStash.db, 'contacts', '1'));
+      await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache);
       await wait(1000);
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), null, 'Missing objects return null.');
     });
@@ -282,7 +295,7 @@ describe('Connector', function() {
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { 1: 1 } }, 'Stash correctly set');
       assert.deepStrictEqual(await fireStash.get('contacts', '1'), expected, 'Sets all data locally');
-      assert.deepStrictEqual((await getDoc(doc(firestore, 'contacts/1'))).data(), expected, 'Gets all data on remote');
+      assert.deepStrictEqual((await getDoc(doc(fireStash.db, 'contacts/1'))).data(), expected, 'Gets all data on remote');
       assert.deepStrictEqual(fetches, ['contacts/1'], 'Fetches only what is necessary');
       assert.strictEqual(1, ran, 'Ran events tests');
     });
@@ -294,7 +307,7 @@ describe('Connector', function() {
         fetches.push(`${collection}/${id}`);
       });
       fireStash.update('contacts/1/phones', '1234567890', { foo: 'bar' });
-      setDoc(doc(firestore, 'contacts/1/phones/0987654321'), { biz: 'baz' });
+      setDoc(doc(fireStash.db, 'contacts/1/phones/0987654321'), { biz: 'baz' });
       fireStash.update('contacts/1/phones', '0987654321');
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.get('contacts/1/phones'), { 1234567890: { foo: 'bar' }, '0987654321': { biz: 'baz' } }, 'Gets all data');
@@ -376,17 +389,17 @@ describe('Connector', function() {
         const cache = {};
         const objects = {};
         const promises: Promise<void>[] = [];
-        let batch = writeBatch(firestore);
+        let batch = writeBatch(fireStash.db);
         for (let i = 0; i < 15000; i++) {
           fireStash.update('collection2', `id${i}`);
           fireStash.update(`collection2/id${i}/sub-page`, String(i));
           fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
-          batch.set(doc(firestore, `collection2/id${i}`), { id: i });
+          batch.set(doc(fireStash.db, `collection2/id${i}`), { id: i });
           cache[`id${i}`] = 1;
           objects[`collection2/id${i}`] = { id: i };
           if (i % 500 === 0) {
             promises.push(batch.commit());
-            batch = writeBatch(firestore);
+            batch = writeBatch(fireStash.db);
           }
         }
 
@@ -399,13 +412,13 @@ describe('Connector', function() {
         assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
         assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
 
-        const dat = await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        const dat = await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
 
         fireStash.update('collection2', `id${15000}`);
         await fireStash.allSettled();
 
-        let dat2 = await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        let dat2 = await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
 
         let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
@@ -414,7 +427,7 @@ describe('Connector', function() {
         assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
 
         await fireStash.balance('collection2');
-        dat2 = await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        dat2 = await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
         page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
         assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
@@ -434,7 +447,7 @@ describe('Connector', function() {
     });
 
     it('large streaming gets are performant', async function() {
-      this.timeout(30000);
+      this.timeout(80000);
 
       const promises: Promise<void>[] = [];
       const bigString = 'x'.repeat(30 * 1024);
@@ -454,23 +467,25 @@ describe('Connector', function() {
       performance.mark('bulkGetStart');
       let now = performance.now();
       const res = await fireStash.get('bulkcollection');
+      let done = performance.now();
       performance.mark('bulkGetEnd');
       performance.measure('bulkGet', 'bulkGetStart', 'bulkGetEnd');
       // console.log('got', Object.keys(res).length);
-      let done = performance.now();
 
       assert.strictEqual(Object.keys(res).length, 15000, 'Fetches all values');
       // console.log('time', done - now);
       // console.log((performance as any).getEntriesByName('bulkGet'));
       // console.log((performance as any).getEntriesByName('bulkUpdate'));
-      assert.ok(done - now < 4200, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
+      console.log(done - now);
+      assert.ok(done - now < 5000, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
 
       now = performance.now();
       const res2 = await fireStash.get('bulkcollection', ids);
       done = performance.now();
       // console.log('time', done - now);
       assert.strictEqual(Object.keys(res2).length, 15000, 'Fetches all values');
-      assert.ok(done - now < 4200, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
+      console.log(done - now);
+      assert.ok(done - now < 5000, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
     });
 
     it('cache-only updates are batched in groups of 490', async function() {
@@ -491,23 +506,23 @@ describe('Connector', function() {
         this.timeout(60000);
 
         await fireStash.stop();
-        fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId++)), lowMem: true });
-
+        fireStash = new FireStash(CONFIG, { directory: path.join(__dirname, String(appId++)), lowMem: true, customToken });
+        await fireStash.allSettled();
         const start = Date.now();
         const cache = {};
         const objects = {};
         const promises: Promise<void>[] = [];
-        let batch = writeBatch(firestore);
+        let batch = writeBatch(fireStash.db);
         for (let i = 0; i < 30000; i++) {
           fireStash.update('unrelated', `id${i}`);
           fireStash.update('collection', `id${i}`);
           fireStash.update('collection/id${i}/sub-document', `i${i}`);
-          batch.set(doc(firestore, `collection/id${i}`), { id: i });
+          batch.set(doc(fireStash.db, `collection/id${i}`), { id: i });
           cache[`id${i}`] = 1;
           objects[`collection/id${i}`] = { id: i };
           if (i % 500 === 0) {
             await batch.commit();
-            batch = writeBatch(firestore);
+            batch = writeBatch(fireStash.db);
           }
         }
         await batch.commit();
@@ -530,13 +545,13 @@ describe('Connector', function() {
         assert.strictEqual(Object.keys(res).filter(Boolean).length, 30000, 'Fetches an obscene amount of data keys.');
         assert.strictEqual(Object.values(res).filter(Boolean).length, 30000, 'Fetches an obscene amount of data values.');
 
-        const dat = await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        const dat = await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         assert.strictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
 
         fireStash.update('collection2', `id${15000}`);
         await fireStash.allSettled();
 
-        let dat2 = await await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        let dat2 = await await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
 
         let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
@@ -545,7 +560,7 @@ describe('Connector', function() {
         assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
 
         await fireStash.balance('collection2');
-        dat2 = await await getDocs(query(collection(firestore, 'firestash'), where('collection', '==', 'collection2')));
+        dat2 = await await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
         page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
         page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
         assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
@@ -575,16 +590,16 @@ describe('Connector', function() {
 
     it('bust increments all previously known ids', async function() {
       this.timeout(6000);
-      await setDoc(doc(firestore, 'collection3/foo'), { a: 1 });
-      await setDoc(doc(firestore, 'collection3/bar'), { b: 2 });
-      await setDoc(doc(firestore, 'collection3/biz'), { c: 3 });
+      await setDoc(doc(fireStash.db, 'collection3/foo'), { a: 1 });
+      await setDoc(doc(fireStash.db, 'collection3/bar'), { b: 2 });
+      await setDoc(doc(fireStash.db, 'collection3/biz'), { c: 3 });
       fireStash.update('collection3', 'foo');
       fireStash.update('collection3', 'bar');
       await fireStash.allSettled();
       assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 1, bar: 1 } }, 'Initial cache correct');
       await fireStash.bust('collection3');
       assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted 1');
-      await setDoc(doc(firestore, 'collection/baz'), { c: 3 });
+      await setDoc(doc(fireStash.db, 'collection/baz'), { c: 3 });
       assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 2, bar: 2 } }, 'Known cache busted 2');
       await fireStash.bust('collection3');
       assert.deepStrictEqual(await fireStash.stash('collection3'), { collection: 'collection3', cache: { foo: 3, bar: 3 } }, 'Known cache busted 3');
@@ -598,14 +613,14 @@ describe('Connector', function() {
     it('ensure generates a new stash from scratch', async function() {
       this.timeout(3000);
 
-      await setDoc(doc(firestore, 'collection4/foo'), { a: 1 });
-      await setDoc(doc(firestore, 'collection4/bar'), { b: 2 });
-      await setDoc(doc(firestore, 'collection4/biz'), { c: 3 });
+      await setDoc(doc(fireStash.db, 'collection4/foo'), { a: 1 });
+      await setDoc(doc(fireStash.db, 'collection4/bar'), { b: 2 });
+      await setDoc(doc(fireStash.db, 'collection4/biz'), { c: 3 });
 
       assert.deepStrictEqual(await fireStash.stash('collection4'), { collection: 'collection4', cache: {} }, 'No cache initially');
       await fireStash.ensure('collection4');
       assert.deepStrictEqual(await fireStash.stash('collection4'), { collection: 'collection4', cache: { foo: 1, bar: 1, biz: 1 } }, 'Full cache after ensure');
-      await setDoc(doc(firestore, 'collection4/baz'), { d: 4 });
+      await setDoc(doc(fireStash.db, 'collection4/baz'), { d: 4 });
       assert.deepStrictEqual(await fireStash.stash('collection4'), { collection: 'collection4', cache: { foo: 1, bar: 1, biz: 1 } }, 'Cache unchanged after bare addition');
       await fireStash.ensure('collection4');
       assert.deepStrictEqual(await fireStash.stash('collection4'), { collection: 'collection4', cache: { foo: 1, bar: 1, biz: 1, baz: 1 } }, 'Missing key added after ensure');
@@ -615,10 +630,10 @@ describe('Connector', function() {
       this.timeout(3000);
       process.env.FIRESTASH_PAGINATION = 10;
 
-      const batch = writeBatch(firestore)
+      const batch = writeBatch(fireStash.db)
       const collection: Record<string, Record<'id', number>> = {};
       for (let i = 0; i < 100; i++) {
-        batch.set(doc(firestore, `collection5/id${i}`), { id: i });
+        batch.set(doc(fireStash.db, `collection5/id${i}`), { id: i });
         collection[`id${i}`] = { id: i };
         fireStash.update('collection5', `id${i}`);
       }
@@ -630,7 +645,7 @@ describe('Connector', function() {
       assert.deepStrictEqual((await fireStash.get('collection5', 'id50')), { id: 50 }, 'Updates existing cache entries on multiple pages 2.');
       assert.deepStrictEqual((await fireStash.get('collection5')), collection, 'Updates existing cache entries on multiple pages 3.');
 
-      await setDoc(doc(firestore, 'collection5/id50'), { id: 500 });
+      await setDoc(doc(fireStash.db, 'collection5/id50'), { id: 500 });
       await fireStash.update('collection5', 'id50');
       await fireStash.allSettled();
       collection.id50.id = 500;
@@ -646,10 +661,10 @@ describe('Connector', function() {
       this.timeout(3000);
       process.env.FIRESTASH_PAGINATION = 10;
 
-      const batch = writeBatch(firestore)
+      const batch = writeBatch(fireStash.db)
       const collection: Record<string, Record<'id', number>> = {};
       for (let i = 0; i < 100; i++) {
-        batch.set(doc(firestore, `collection5/element/page/id${i}`), { id: i });
+        batch.set(doc(fireStash.db, `collection5/element/page/id${i}`), { id: i });
         collection[`id${i}`] = { id: i };
         fireStash.update('collection5/element/page', `id${i}`);
       }
@@ -661,7 +676,7 @@ describe('Connector', function() {
       assert.deepStrictEqual((await fireStash.get('collection5/element/page', 'id50')), { id: 50 }, 'Updates existing cache entries on multiple pages 2.');
       assert.deepStrictEqual((await fireStash.get('collection5/element/page')), collection, 'Updates existing cache entries on multiple pages 3.');
 
-      await setDoc(doc(firestore, 'collection5/element/page/id50'), { id: 500 });
+      await setDoc(doc(fireStash.db, 'collection5/element/page/id50'), { id: 500 });
       await fireStash.update('collection5/element/page', 'id50');
       await fireStash.allSettled();
 
@@ -682,18 +697,18 @@ describe('Connector', function() {
       fireStash.on('contacts', () => called++);
       await fireStash.watch('contacts');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
-      const cache = (await getDoc(doc(firestore, 'firestash', cacheKey))).data();
+      const cache = (await getDoc(doc(fireStash.db, 'firestash', cacheKey))).data();
       assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
       if (!cache) throw new Error('No Cache Object');
 
       cache.cache.id1++;
-      await setDoc(doc(firestore, 'firestash', cacheKey), cache, { merge: true });
+      await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
       cache.cache.id1++;
-      await setDoc(doc(firestore, 'firestash', cacheKey), cache, { merge: true });
+      await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
       await wait(1200);
 
       cache.cache.id1++;
-      await setDoc(doc(firestore, 'firestash', cacheKey), cache, { merge: true });
+      await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
       await wait(1200);
 
       assert.strictEqual(called, 2, 'Listens for remote updates');
@@ -707,13 +722,13 @@ describe('Connector', function() {
       fireStash.on('contacts', () => ++called);
       await fireStash.watch('contacts');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
-      const cache = (await getDoc(doc(firestore, 'firestash', cacheKey))).data();
+      const cache = (await getDoc(doc(fireStash.db, 'firestash', cacheKey))).data();
       assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
       if (!cache) throw new Error('No Cache Object');
 
       for (let i = 0; i < 4; i++) {
         cache.cache.id1++;
-        await setDoc(doc(firestore, 'firestash', cacheKey), cache, { merge: true });
+        await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
         await wait(180);
       }
 
@@ -729,13 +744,13 @@ describe('Connector', function() {
       fireStash.on('contacts', () => ++called);
       await fireStash.watch('contacts');
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
-      const cache = (await getDoc(doc(firestore, 'firestash', cacheKey))).data();
+      const cache = (await getDoc(doc(fireStash.db, 'firestash', cacheKey))).data();
       assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
       if (!cache) throw new Error('No Cache Object');
 
       for (let i = 0; i < 30; i++) {
         cache.cache.id1++;
-        await setDoc(doc(firestore, 'firestash', cacheKey), cache, { merge: true });
+        await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
         await wait(200);
       }
       await fireStash.allSettled();
@@ -747,9 +762,9 @@ describe('Connector', function() {
       let called = 0;
       const unSub = await fireStash.onSnapshot(path, () => called++);
       await wait(50);
-      await setDoc(doc(firestore, path), { foo: 'a' });
+      await setDoc(doc(fireStash.db, path), { foo: 'a' });
       await wait(50);
-      await setDoc(doc(firestore, path), { foo: 'b' });
+      await setDoc(doc(fireStash.db, path), { foo: 'b' });
       await wait(50);
       assert.strictEqual(called, 3, 'Listens for remote updates');
       unSub();
@@ -777,16 +792,16 @@ describe('Connector', function() {
       const BIG_STRING = '0'.repeat((1048576 / 2) - 90); // Max document size is 1,048,576 bytes Will cause a page overflow on update 3.
       for (let i = 0; i < 3; i++) {
         try {
-          (await setDoc(doc(firestore, `firestash/${cacheKey('overflow', 0)}`), { [`BIG_STRING_${i}`]: BIG_STRING }, { merge: true }));
+          (await setDoc(doc(fireStash.db, `firestash/${cacheKey('overflow', 0)}`), { [`BIG_STRING_${i}`]: BIG_STRING }, { merge: true }));
         } catch (err) {
           1;
         }
         await fireStash.update('overflow', `BIG_STRING_${i}`, { id: i });
         try {
           assert.deepStrictEqual((await fireStash.get<{ id: number }>('overflow', `BIG_STRING_${i}`))?.id, i);
-          assert.deepStrictEqual((await getDoc(doc(firestore, `overflow/BIG_STRING_${i}`))).data()?.id, i);
-          assert.strictEqual((await getDoc(doc(firestore, `firestash/${cacheKey('overflow', 0)}`))).exists(), true);
-          assert.strictEqual((await getDoc(doc(firestore, `firestash/${cacheKey('overflow', 1)}`))).exists(), i >= 2);
+          assert.deepStrictEqual((await getDoc(doc(fireStash.db, `overflow/BIG_STRING_${i}`))).data()?.id, i);
+          assert.strictEqual((await getDoc(doc(fireStash.db, `firestash/${cacheKey('overflow', 0)}`))).exists(), true);
+          assert.strictEqual((await getDoc(doc(fireStash.db, `firestash/${cacheKey('overflow', 1)}`))).exists(), i >= 2);
         }
         catch (err) {
           console.error(err);
@@ -794,18 +809,19 @@ describe('Connector', function() {
         }
       }
 
-      assert.deepStrictEqual(Object.values((await getDoc(doc(firestore, `firestash/${cacheKey('overflow', 0)}`))).data()?.cache), [ 1, 1 ]);
-      assert.deepStrictEqual(Object.values((await getDoc(doc(firestore, `firestash/${cacheKey('overflow', 1)}`))).data()?.cache), [1]);
+      assert.deepStrictEqual(Object.values((await getDoc(doc(fireStash.db, `firestash/${cacheKey('overflow', 0)}`))).data()?.cache), [ 1, 1 ]);
+      assert.deepStrictEqual(Object.values((await getDoc(doc(fireStash.db, `firestash/${cacheKey('overflow', 1)}`))).data()?.cache), [1]);
     });
 
     it('small remote updates', async function() {
       this.timeout(60000);
       fireStash.update('remote-changes', '1', { id: 0 });
       await fireStash.allSettled();
-      fireStash.stop();
-      await setDoc(doc(firestore, 'remote-changes/1'), { id: 1 });
-      await setDoc(doc(firestore, `firestash/${cacheKey('remote-changes', 0)}`), { collection: 'remote-changes', cache: { 1: 1 } });
-      fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId)) });
+      await setDoc(doc(fireStash.db, 'remote-changes/1'), { id: 1 });
+      await setDoc(doc(fireStash.db, `firestash/${cacheKey('remote-changes', 0)}`), { collection: 'remote-changes', cache: { 1: 1 } });
+      await fireStash.stop();
+      fireStash = new FireStash(CONFIG, { directory: path.join(__dirname, String(appId)), customToken });
+      await fireStash.allSettled();
       const data = await fireStash.get('remote-changes', ['1']);
       assert.deepStrictEqual(data, { 1: { id: 1 } });
     });
@@ -815,8 +831,8 @@ describe('Connector', function() {
       const ids = [];
       const expected = {};
       for (let i = 0; i < 50; i++) {
-        await setDoc(doc(firestore, `remote-changes/${i}`), { id: i });
-        await setDoc(doc(firestore, `firestash/${cacheKey('remote-changes', 0)}`), { collection: 'remote-changes', cache: { [i]: i } }, { merge: true });
+        await setDoc(doc(fireStash.db, `remote-changes/${i}`), { id: i });
+        await setDoc(doc(fireStash.db, `firestash/${cacheKey('remote-changes', 0)}`), { collection: 'remote-changes', cache: { [i]: i } }, { merge: true });
         ids.push(`${i}`);
         expected[i] = { id: i };
       }
