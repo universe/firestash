@@ -11,7 +11,7 @@ function encode(key: string) {
 
 export function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
 
-export type ServiceAccount = {
+export type FirebaseConfig = {
   projectId: string;
   apiKey?: string;
   appId?: string;
@@ -27,6 +27,7 @@ export interface FireStashOptions {
   readOnly: boolean;
   lowMem: boolean;
   directory: string | null;
+  customToken: string | null;
 }
 
 export interface IFireStashPage<T = number> {
@@ -39,6 +40,7 @@ const DEFAULT_OPTIONS: FireStashOptions = {
   readOnly: false,
   lowMem: false,
   directory: null,
+  customToken: null,
 };
 
 export interface IFireStash {
@@ -72,7 +74,7 @@ declare interface AbstractFireStash {
 }
 
 abstract class AbstractFireStash extends EventEmitter implements IFireStash {
-  protected project: ServiceAccount;
+  protected project: FirebaseConfig;
   protected options: FireStashOptions = { ...DEFAULT_OPTIONS };
 
   public readonly abstract app: FirebaseApp;
@@ -84,7 +86,7 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
    * @param app The Firebase App Instance.
    * @param directory The cache backup directory (optional)
    */
-  constructor(project: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
+  constructor(project: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super();
     this.project = project;
     this.options = Object.assign(this.options, options);

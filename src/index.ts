@@ -1,14 +1,12 @@
 import * as path from 'path';
 import { fork, ChildProcess } from 'child_process';
-import Firebase from 'firebase/compat/app';
-import 'firebase/compat/auth';
-import 'firebase/compat/firestore';
-import { FirebaseApp, initializeApp } from 'firebase/app';
-import { Firestore, initializeFirestore, connectFirestoreEmulator } from 'firebase/firestore';
+import { FirebaseApp, initializeApp, deleteApp } from 'firebase/app';
+import { Auth, getAuth, signInWithCustomToken, connectAuthEmulator } from 'firebase/auth';
+import { Firestore, initializeFirestore, connectFirestoreEmulator, FieldValue } from 'firebase/firestore';
 import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 
-import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
+import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig } from './types.js';
 
 export { cacheKey }
 
@@ -25,9 +23,10 @@ export default class FireStash extends AbstractFireStash {
 
   app: FirebaseApp;
   db: Firestore;
-  firebase: typeof Firebase;
+  auth: Auth;
+  FieldValue = FieldValue;
 
-  constructor(config: ServiceAccount, options?: Partial<FireStashOptions> | undefined) {
+  constructor(config: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super(config, options);
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
@@ -52,16 +51,19 @@ export default class FireStash extends AbstractFireStash {
     });
 
     // Start our own firebase connection for in-process access.
-    // const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
-    this.firebase = Firebase;
     this.app = initializeApp(config, `${config.projectId}-firestash-${nanoid()}`);
+
+    // If a custom token was provided, sign the user in. Intentional fire and forget here.
+    this.auth = getAuth(this.app);
+    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectAuthEmulator(this.auth, `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`);
+    options?.customToken && (signInWithCustomToken(this.auth, options.customToken));
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
-    process.env.FIREBASE_AUTH_EMULATOR_HOST && connectFirestoreEmulator(
+    process.env.FIRESTORE_EMULATOR_HOST && connectFirestoreEmulator(
       this.db,
-      process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
-      parseInt(process.env.FIREBASE_AUTH_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
+      process.env.FIRESTORE_EMULATOR_HOST?.split(':')?.[0] || 'localhost',
+      parseInt(process.env.FIRESTORE_EMULATOR_HOST?.split(':')?.[1] || '5050') || 5050,
     );
 
     // Ensure we don't leave zombies around.
@@ -112,12 +114,13 @@ export default class FireStash extends AbstractFireStash {
   public watchers() { return this.runInWorker([ 'watchers', []]); }
   public unwatch(collection: string): Promise<void> { return this.runInWorker([ 'unwatch', [collection]]); }
   public async stop(): Promise<void> {
-    await this.runInWorker([ 'stop', []]);
     process.off('exit', this.ensureWorkerKilled);
     process.off('SIGHUP', this.ensureWorkerKilled);
     process.off('SIGINT', this.ensureWorkerKilled);
     process.off('SIGTERM', this.ensureWorkerKilled);
+    await this.runInWorker([ 'stop', []]);
     this.ensureWorkerKilled();
+    try { await deleteApp(this.app); } catch { 1; } // Fails if already deleted.
   }
 
   async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
