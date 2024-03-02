@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 
 import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig } from './types.js';
 
-export { cacheKey }
+export { cacheKey, type FirebaseConfig, type FireStashOptions }
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const IS_DEV = process.env.NODE_ENV !== 'production';
@@ -24,7 +24,6 @@ export default class FireStash extends AbstractFireStash {
   app: FirebaseApp;
   db: Firestore;
   auth: Auth;
-  FieldValue = FieldValue;
 
   constructor(config: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super(config, options);
