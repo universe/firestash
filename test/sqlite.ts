@@ -215,5 +215,29 @@ describe('Connector', function() {
       iter.end();
       assert.deepStrictEqual(values, [ 'foo', 'fizz', 'biz' ]);
     });
+
+    it('is able to iterate concurrently', async function() {
+      const batch = db.batch();
+      for (let i = 0; i < 1000; i++) {
+        batch.put(`${i}`, Buffer.from(`${i}`));
+      }
+      await batch.write();
+
+      let i = 0;
+      async function iterate() {
+        for await (const _ of db.iterator({ reverse: true })) {
+          i++;
+        }
+      }
+      await Promise.all([
+        iterate(),
+        iterate(),
+        iterate(),
+        iterate(),
+        iterate(),
+      ]);
+
+      assert.deepStrictEqual(i, 5000);
+    });
   });
 });

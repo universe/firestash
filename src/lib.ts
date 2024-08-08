@@ -5,10 +5,8 @@ import * as path from 'path';
 import deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
 // import * as LRU from 'lru-cache';
-import type LevelUp from 'levelup';
-import type LevelDown from 'leveldown';
-import type RocksDb from 'rocksdb';
-import type MemDown from 'memdown';
+import LevelUp from 'levelup';
+import MemDown from 'memdown';
 
 import LevelSQLite from './sqlite.js';
 import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
@@ -16,22 +14,6 @@ import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, Servic
 export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 
 const GET_PAGINATION_SIZE = 100;
-
-let levelup: typeof LevelUp | undefined;
-try { levelup = (await import('levelup')).default as unknown as typeof LevelUp; }
-catch { 1; }
-
-let leveldown: typeof LevelDown.default | undefined;
-try { leveldown = (await import('leveldown')).default as unknown as typeof LevelDown.default; }
-catch { 1; }
-
-let memdown: typeof MemDown.default | undefined;
-try { memdown = (await import('memdown')).default as unknown as typeof MemDown.default; }
-catch { 1; }
-
-let rocksdb: typeof RocksDb.default | undefined;
-try { rocksdb = (await import('rocksdb')).default as unknown as typeof RocksDb.default; }
-catch { 1; }
 
 declare global {
   // https://github.com/DefinitelyTyped/DefinitelyTyped/issues/40366
@@ -141,26 +123,12 @@ export default class FireStash extends AbstractFireStash {
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
-    if (this.options.datastore === 'rocksdb' && this.dir) {
-      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
-      if (!rocksdb) { throw new Error('Missing optional peer dependency "rocksdb".'); }
-      fs.mkdirSync(this.dir, { recursive: true });
-      this.level = levelup(rocksdb(path.join(this.dir, '.firestash.rocks')), { readOnly: this.options.readOnly });
-    }
-    else if (this.options.datastore === 'leveldown' && this.dir) {
-      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
-      if (!leveldown) { throw new Error('Missing optional peer dependency "leveldown".'); }
-      fs.mkdirSync(this.dir, { recursive: true });
-      this.level = levelup(leveldown(path.join(this.dir, '.firestash')));
-    }
-    else if (this.options.datastore === 'sqlite' && this.dir) {
+    if (this.options.datastore === 'sqlite' && this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = new LevelSQLite(path.join(this.dir, '.firestash.db'));
     }
     else {
-      if (!levelup) { throw new Error('Missing optional peer dependency "levelup".'); }
-      if (!memdown) { throw new Error('Missing optional peer dependency "memdown".'); }
-      this.level = levelup(memdown());
+      this.level = LevelUp((MemDown as any)());
     }
 
     // Set Immediate is better to use than the default nextTick for newer versions of Node.js.
