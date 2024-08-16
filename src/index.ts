@@ -2,7 +2,7 @@ import * as path from 'path';
 import { fork, ChildProcess } from 'child_process';
 import { FirebaseApp, initializeApp, deleteApp } from 'firebase/app';
 import { Auth, getAuth, signInWithCustomToken, connectAuthEmulator } from 'firebase/auth';
-import { Firestore, initializeFirestore, connectFirestoreEmulator, FieldValue } from 'firebase/firestore';
+import { Firestore, initializeFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 
