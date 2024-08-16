@@ -768,7 +768,7 @@ describe('Connector', function() {
       await wait(50);
       assert.strictEqual(called, 3, 'Listens for remote updates');
       unSub();
-      await firestore.doc(path).set({ foo: 'b' });
+      await setDoc(doc(fireStash.db, path), { foo: 'b' });
       await wait(50);
       assert.strictEqual(called, 3, 'Unsubscribes from remote updates');
     });
