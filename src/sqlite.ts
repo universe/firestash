@@ -24,6 +24,10 @@ function initDb(path: string, readonly: boolean): Database {
     db = new SQLiteConstructor(path);
   }
   db.pragma('journal_mode = WAL');
+
+  // this.db.pragma('journal_mode = OFF');
+  // this.db.pragma('synchronous = OFF');
+  // this.db.pragma('foreign_keys = 0');
   db.unsafeMode(true);
   if (!readonly) {
     db.exec(`
@@ -36,6 +40,7 @@ function initDb(path: string, readonly: boolean): Database {
   }
   return db;
 }
+
 
 export default class LevelSQLite {
   public readonly path: string;
@@ -51,12 +56,12 @@ export default class LevelSQLite {
     this.iterDb = initDb(path, true);
     this._get = this.db.prepare<[string]>('SELECT "value" FROM "store" WHERE "key" = ?').pluck();
     this._getAll = this.db.prepare<[string[]]>(`SELECT "key", "value" FROM "store" WHERE "key" IN (${new Array(100).fill('?').join(', ')})`);
-    this._put = this.db.prepare<{ key: string; value: Buffer; }>('INSERT INTO "store" ("key","value") VALUES (@key, @value) ON CONFLICT ("key") DO UPDATE SET "value" = @value;');
+    this._put = this.db.prepare<{ key: string; value: Buffer; }>(`INSERT INTO "store" ("key","value") VALUES (?, ?) ON CONFLICT ("key") DO UPDATE SET "value" = excluded.value;`);
     this._del = this.db.prepare<[string]>('DELETE FROM "store" WHERE "key" = ?');
   }
 
   async get(key: string, _options?: { asBuffer?: boolean }, cb?: (err: Error | undefined, value: Buffer | null) => void): Promise<Buffer | undefined> {
-    const res = this._get.get(key) as Buffer || undefined;
+    const res = (this._get.get(key) as Buffer) || undefined;
     cb?.(undefined, res);
     return res;
   }
@@ -85,7 +90,7 @@ export default class LevelSQLite {
 
   async put(key: string, value: Buffer | string): Promise<void> {
     if (typeof value === 'string') { value = Buffer.from(value); }
-    this._put.run({ key, value });
+    this._put.run(key, value);
   }
 
   iterator(options?: {
@@ -146,13 +151,32 @@ export default class LevelSQLite {
     };
   }
 
+
+  #batch = false;
   batch(): LevelSQLiteBatch {
-    // this.db.exec('BEGIN TRANSACTION');
     return {
-      put: (key: string, value: Buffer | string) => this.put(key, value),
-      del: (key: string) => this.del(key),
+      put: (key: string, value: Buffer | string) => {
+        if (!this.#batch) {
+          this.db.exec('BEGIN TRANSACTION');
+          this.db.pragma('ignore_check_constraints = 1');
+          this.#batch = true;
+        }
+        this._put.run(key, value);
+      },
+      del: (key: string) => {
+        if (!this.#batch) {
+          this.db.exec('BEGIN TRANSACTION');
+          this.db.pragma('ignore_check_constraints = 1');
+          this.#batch = true;
+        }
+        this.del(key);
+      },
       write: () => {
-        // this.db.exec('COMMIT');
+        if (this.#batch) {
+          this.db.pragma('ignore_check_constraints = 0');
+          this.db.exec('COMMIT');
+          this.#batch = false;
+        }
         return Promise.resolve();
       },
     };

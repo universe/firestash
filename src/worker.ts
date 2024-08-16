@@ -1,11 +1,15 @@
-import FireStash, { IFireStash, FireStashOptions, ServiceAccount } from './lib.js';
+import FireStash, { IFireStash, FireStashOptions, FirebaseConfig } from './lib.js';
 
-const [ credential, options, parentPid ]: [ ServiceAccount, FireStashOptions, number ] = [ JSON.parse(process.argv[2]), JSON.parse(process.argv[3]), parseInt(process.argv[4]) ];
+const [ credential, options, parentPid ]: [ FirebaseConfig, FireStashOptions, number ] = [ JSON.parse(process.argv[2]), JSON.parse(process.argv[3]), parseInt(process.argv[4]) ];
 
 class WorkerFireStash extends FireStash {
   emit(type: string | symbol, ...args: any[]): boolean {
     const res = super.emit(type, ...args);
-    process.send?.([ 'event', type, args ]);
+    try {
+      process.send?.([ 'event', type, args ]);
+    } catch (err) {
+      console.error(err);
+    }
     return res;
   }
 }
