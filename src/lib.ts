@@ -869,7 +869,7 @@ export default class FireStash extends AbstractFireStash {
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
    */
-  async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
+  public async * stream<T=object>(collection: string, id?: string | string[], filter: string | null = null): AsyncGenerator<[string, T | null], void, void> {
     const idArr = id ? (Array.isArray(id) ? id : [id]) : [] as string[];
     const ids = new Set(idArr.map(id => `${collection}/${id}`));
     const toGet: string[] = [...ids];
@@ -905,7 +905,7 @@ export default class FireStash extends AbstractFireStash {
       const sliceIdx = collectionPrefix.length;
       if (!toGet.length) {
         // Slightly faster to request the keys as strings instead of buffers.
-        const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
+        const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false, filter });
         for await (const [id] of iterator as unknown as AsyncIterableIterator<string>) {
           if (!id || (id.slice(0, sliceIdx) !== collectionPrefix)) { break; }
           // If is in the provided ID set, is not the collection itself, queue a get for this key

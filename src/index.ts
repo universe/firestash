@@ -96,7 +96,7 @@ export default class FireStash extends AbstractFireStash {
   public unwatch(collection: string): Promise<void> { return this.runInWorker([ 'unwatch', [collection]]); }
   public stop(): Promise<void> { return this.runInWorker([ 'stop', []]); }
 
-  async * stream<T=object>(collection: string, id?: string | string[]): AsyncGenerator<[string, T | null], void, void> {
+  async * stream<T=object>(collection: string, id: string | string[] | null = null, filter: string | null = null): AsyncGenerator<[string, T | null], void, void> {
     let val: { value: [string, T | null]; done: boolean } = { value: [ '', null ], done: false };
     const iteratorId = this.#messageId = (this.#messageId + 1) % Number.MAX_SAFE_INTEGER;
     let firstRun = true;
@@ -104,7 +104,7 @@ export default class FireStash extends AbstractFireStash {
       while (!val.done) {
         val = await new Promise<{ value: [string, T | null]; done: boolean }>((resolve, reject) => {
           this.#iterators[iteratorId] = [ resolve, reject ];
-          this.#worker.send([ iteratorId, [ 'stream', firstRun ? [ collection, id ] : null ]]);
+          this.#worker.send([ iteratorId, [ 'stream', firstRun ? [ collection, id, filter ] : null ]]);
         });
         firstRun = false;
         if (val.done) { break; }
