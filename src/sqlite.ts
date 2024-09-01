@@ -98,6 +98,7 @@ export default class LevelSQLite {
     lte?: string | null;
     gt?: string | null;
     lt?: string | null;
+    filter?: string | null;
     reverse?: boolean;
     values?: boolean;
     keys?: boolean;
@@ -111,7 +112,8 @@ export default class LevelSQLite {
         (@gt ISNULL OR "key" > @gt) AND
         (@lt ISNULL OR "key" < @lt) AND
         (@gte ISNULL OR "key" >= @gte) AND
-        (@lte ISNULL OR "key" <= @lte)
+        (@lte ISNULL OR "key" <= @lte) AND
+        (@filter ISNULL OR instr("value", @filter))
       ORDER BY "key" ASC
     `).raw();
     const _iteratorDesc = iterDb.prepare(`
@@ -120,12 +122,13 @@ export default class LevelSQLite {
         (@gt ISNULL OR "key" > @gt) AND
         (@lt ISNULL OR "key" < @lt) AND
         (@gte ISNULL OR "key" >= @gte) AND
-        (@lte ISNULL OR "key" <= @lte)
+        (@lte ISNULL OR "key" <= @lte) AND
+        (@filter ISNULL OR instr("value", @filter))
       ORDER BY "key" DESC
     `).raw();
     const iter = options?.reverse === true
-      ? _iteratorDesc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null })
-      : _iteratorAsc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null });
+      ? _iteratorDesc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null, filter: options?.filter ? Buffer.from(options?.filter) : null })
+      : _iteratorAsc.iterate({ gt: options?.gt || null, lt: options?.lt || null, gte: options?.gte || null, lte: options?.lte || null, filter: options?.filter ? Buffer.from(options?.filter) : null });
     return {
       next: (cb: (err: Error | undefined, id: [string] | undefined) => void) => {
         const value = iter.next().value as [string] | undefined;
