@@ -107,8 +107,7 @@ export default class LevelSQLite {
         (@gt ISNULL OR "key" > @gt) AND
         (@lt ISNULL OR "key" < @lt) AND
         (@gte ISNULL OR "key" >= @gte) AND
-        (@lte ISNULL OR "key" <= @lte) AND
-        (@filter ISNULL OR instr("value", @filter))
+        (@lte ISNULL OR "key" <= @lte)
       ORDER BY "key" ASC
     `).raw();
     const _iteratorDesc = iterDb.prepare(`
@@ -117,8 +116,7 @@ export default class LevelSQLite {
         (@gt ISNULL OR "key" > @gt) AND
         (@lt ISNULL OR "key" < @lt) AND
         (@gte ISNULL OR "key" >= @gte) AND
-        (@lte ISNULL OR "key" <= @lte) AND
-        (@filter ISNULL OR instr("value", @filter))
+        (@lte ISNULL OR "key" <= @lte)
       ORDER BY "key" DESC
     `).raw();
     const iter = options?.reverse === true

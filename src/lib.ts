@@ -940,7 +940,10 @@ export default class FireStash extends AbstractFireStash {
             try {
               // Faster than one big parse at end.
               if (isDirty(record)) { modified.add(key); }
-              else { yield [ key, reify<T>(record) ]; }
+              else {
+                if (filter && !record.includes(filter)) { continue; }
+                yield [ key, reify<T>(record) ];
+              }
             }
             catch (err) {
               this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
@@ -970,6 +973,7 @@ export default class FireStash extends AbstractFireStash {
           const data = stringify(obj);
           setClean(data);
           batch.put(id, data);
+          if (filter && !data.includes(filter)) { continue; }
           // !this.options.lowMem && (this.documentMemo.set(id, data));
           yield [ doc.id, obj ];
         }
