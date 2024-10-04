@@ -424,13 +424,17 @@ export default class FireStash extends AbstractFireStash {
             for (const [ pageId, update ] of Object.entries(updates)) {
               try {
                 this.log.info(`Updating Cache Object ${pageId} With ${Object.keys(update.cache).length} Cache Keys`);
-                await db.collection('firestash').doc(pageId).set(update, { merge: true });
+                if (Object.keys(update.cache || {}).length) {
+                  await db.collection('firestash').doc(pageId).set(update, { merge: true });
+                }
               }
               catch {
                 this.log.error(`Correcting Cache Object Data Overflow on ${pageId}`);
                 const localStash = collectionStashes.get(update.collection) || {};
                 const newPage = cacheKey(update.collection, Object.keys(localStash).length);
-                await db.collection('firestash').doc(newPage).set(update, { merge: true });
+                if (Object.keys(update.cache || {}).length) {
+                  await db.collection('firestash').doc(newPage).set(update, { merge: true });
+                }
               }
             }
           }
@@ -450,7 +454,9 @@ export default class FireStash extends AbstractFireStash {
           i++;
           batchUpdates[pageId].cache[key] = value;
           if (i >= MAX_UPDATE_SIZE) {
-            batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+            if (Object.keys(batchUpdates[pageId].cache || {}).length) {
+              batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+            }
             await commitPage(this.db, batch, batchUpdates);
             batchUpdates = {};
             batchUpdates[pageId] = { collection: page.collection, cache: {} };
@@ -458,7 +464,9 @@ export default class FireStash extends AbstractFireStash {
             i = 0;
           }
         }
-        batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+        if (Object.keys(batchUpdates[pageId].cache || {}).length) {
+          batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
+        }
       }
       await commitPage(this.db, batch, batchUpdates);
 

@@ -756,14 +756,21 @@ describe('Connector', function() {
 
     it('overflows cache tables gracefully', async function() {
       this.timeout(60000);
-      const BIG_STRING = '0'.repeat(500000); // Basically a half megabyte string. Will cause a page overflow on update 3.
-      for (let i = 0; i < 3; i++) {
-        await fireStash.update('overflow', `${BIG_STRING}_${i}`, { id: i });
+      await firestore.doc(`firestash/${cacheKey('overflow', 0)}`).set({
+        big: '0'.repeat(1048576 - (1500 * 3)),
+      }, { merge: true });
+      // Max key size is 1500 bytes
+      const BIG_STRING = '0'.repeat(1500);
+      // Basically a half megabyte string. Will cause a page overflow on update 3.
+      const max = 3;
+      for (let i = 0; i < max; i++) {
+        const key = `${BIG_STRING.slice(0, (String(i).length * -1) - 1)}_${i}`;
+        await fireStash.update('overflow', key, { id: i });
         try {
-          assert.deepStrictEqual(await fireStash.get('overflow', `${BIG_STRING}_${i}`), { id: i });
-          assert.deepStrictEqual((await firestore.doc(`overflow/${BIG_STRING}_${i}`).get()).data(), { id: i });
+          assert.deepStrictEqual(await fireStash.get('overflow', key), { id: i });
+          assert.deepStrictEqual((await firestore.doc(`overflow/${key}`).get()).data(), { id: i });
           assert.strictEqual((await firestore.doc(`firestash/${cacheKey('overflow', 0)}`).get()).exists, true);
-          assert.strictEqual((await firestore.doc(`firestash/${cacheKey('overflow', 1)}`).get()).exists, i >= 2);
+          assert.strictEqual((await firestore.doc(`firestash/${cacheKey('overflow', 1)}`).get()).exists, i >= (max - 1));
         }
         catch (err) {
           console.error(err);
