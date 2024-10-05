@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "3.2.2",
+  "version": "3.2.3",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "license": "MIT",
@@ -33,12 +33,12 @@
     "nanoid": "^3.1.30"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^11.3.0",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
   "peerDependencies": {
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^11.3.0",
     "firebase-admin": "*",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
@@ -59,7 +59,7 @@
     "@types/rocksdb": "^3.0.1",
     "@typescript-eslint/eslint-plugin": "^5.22.0",
     "@typescript-eslint/parser": "^5.22.0",
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^11.3.0",
     "chai": "^4.3.4",
     "dotenv": "^8.0.0",
     "eslint": "8.35.0",
