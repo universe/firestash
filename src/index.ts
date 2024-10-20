@@ -8,7 +8,6 @@ import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, Servic
 import { cacheKey } from './lib.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
   #worker: ChildProcess;
@@ -23,26 +22,18 @@ export default class FireStash extends AbstractFireStash {
 
   constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
     super(project, options);
+
+    // Bind listener methods.
+    this.onWorkerMessage = this.onWorkerMessage.bind(this);
+    this.killWorker = this.killWorker.bind(this);
+
+    // Start our worker and listen for worker messages.
     this.#worker = fork(
       path.join(__dirname, './worker.js'),
       [ JSON.stringify(project), JSON.stringify(options || {}), String(process.pid) ],
       process.env.NODE_ENV === 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
     );
-    this.#worker.on('message', ([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) => {
-      if (type === 'method') {
-        const cb = this.#tasks[id];
-        delete this.#tasks[id];
-        err ? cb[1](err) : cb[0](res);
-      }
-      else if (type === 'event') { this.emit(id, ...res); }
-      else if (type === 'snapshot') { this.#listeners[id]?.(res); }
-      else if (type === 'iterator') {
-        const cb = this.#iterators[id];
-        delete this.#iterators[id];
-        if (err) { cb[1](new Error(err)); }
-        else { cb[0](res || null); }
-      }
-    });
+    this.#worker.on('message', this.onWorkerMessage);
 
     // Start our own firebase connection for in-process access.
     const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
@@ -54,10 +45,30 @@ export default class FireStash extends AbstractFireStash {
     this.db.settings({ ignoreUndefinedProperties: true });
 
     // Ensure we don't leave zombies around.
-    process.on('exit', () => this.#worker.kill());
-    process.on('SIGHUP', () => this.#worker.kill());
-    process.on('SIGINT', () => this.#worker.kill());
-    process.on('SIGTERM', () => this.#worker.kill());
+    process.on('exit', this.killWorker);
+    process.on('SIGHUP', this.killWorker);
+    process.on('SIGINT', this.killWorker);
+    process.on('SIGTERM', this.killWorker);
+  }
+
+  private killWorker() {
+    this.#worker.killed || this.#worker.kill();
+  }
+
+  private async onWorkerMessage([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) {
+    if (type === 'method') {
+      const cb = this.#tasks[id];
+      delete this.#tasks[id];
+      err ? cb[1](err) : cb[0](res);
+    }
+    else if (type === 'event') { this.emit(id, ...res); }
+    else if (type === 'snapshot') { this.#listeners[id]?.(res); }
+    else if (type === 'iterator') {
+      const cb = this.#iterators[id];
+      delete this.#iterators[id];
+      if (err) { cb[1](new Error(err)); }
+      else { cb[0](res || null); }
+    }
   }
 
   private async runInWorker<M extends Exclude<keyof IFireStash, 'db' | 'app'>>(
@@ -66,13 +77,6 @@ export default class FireStash extends AbstractFireStash {
     return new Promise<Awaited<ReturnType<IFireStash[M]>>>((resolve: (value: Awaited<ReturnType<IFireStash[M]>>) => void, reject: (err: Error) => void) => {
       const id = this.#messageId = (this.#messageId + 1) % Number.MAX_SAFE_INTEGER;
       this.#tasks[id] = [ resolve, reject ];
-      if (message[0] === 'onSnapshot') {
-        this.#listeners[id] = message[1][1] as (snapshot?: unknown) => any;
-        message[1][1] = undefined; // Don't send functions over IPC.
-      }
-      if (message[0] === 'unsubscribe') {
-        delete this.#listeners[message[1][0] as number];
-      }
       this.#worker.send([ id, message ]);
     });
   }
@@ -86,15 +90,43 @@ export default class FireStash extends AbstractFireStash {
     return () => this.unwatch(collection);
   }
 
-  public async onSnapshot<Data = any>(documentPath: string, callback: (snapshot?: Data) => any, timeout = 1000): Promise<() => void> {
-    const id = this.#messageId;
-    await this.runInWorker([ 'onSnapshot', [ documentPath, callback as (snapshot?: unknown) => any, timeout ]]);
-    return () => { this.#worker.send([ id, [ 'unsubscribe', []]]); };
-  }
-
   public watchers() { return this.runInWorker([ 'watchers', []]); }
   public unwatch(collection: string): Promise<void> { return this.runInWorker([ 'unwatch', [collection]]); }
-  public stop(): Promise<void> { return this.runInWorker([ 'stop', []]); }
+
+  private deleted = false;
+  public async stop(): Promise<void> {
+    if (this.deleted === true) { return; }
+    this.deleted = true;
+    // Clean up our worker. Give it max three seconds to do it's business
+    try {
+      new Promise((resolve, reject) => {
+        setTimeout(reject, 3000);
+        this.runInWorker([ 'stop', []]).then(resolve);
+      })
+    } catch {
+      this.#worker.connected && this.#worker.disconnect();
+      this.#worker.killed || this.#worker.kill();
+    }
+    this.#worker.off('message', this.onWorkerMessage);
+    process.off('exit', this.killWorker);
+    process.off('SIGHUP', this.killWorker);
+    process.off('SIGINT', this.killWorker);
+    process.off('SIGTERM', this.killWorker);
+
+    // Stop the in-process firebase app.
+    await this.app?.delete();
+    for (const [, reject] of Object.values(this.#tasks)) {
+      reject(new Error('FireStash Stopped'));
+    }
+    for (const [, reject] of Object.values(this.#iterators)) {
+      reject(new Error('FireStash Stopped'));
+    }
+
+    // Clean up our state.
+    this.#tasks = {};
+    this.#iterators = {};
+    this.#listeners = {};
+  }
 
   async * stream<T=object>(collection: string, id: string | string[] | null = null, filter: string | null = null): AsyncGenerator<[string, T | null], void, void> {
     let val: { value: [string, T | null]; done: boolean } = { value: [ '', null ], done: false };

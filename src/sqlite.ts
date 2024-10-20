@@ -41,6 +41,7 @@ export default class LevelSQLite {
   public readonly path: string;
   public readonly iterDb: Database;
   public readonly db: Database;
+  public open: boolean = true;
   private _get: Statement;
   private _getAll: Statement;
   private _put: Statement;
@@ -126,14 +127,14 @@ export default class LevelSQLite {
       next: (cb: (err: Error | undefined, id: [string] | undefined) => void) => {
         const value = iter.next().value as [string] | undefined;
         if (!value) {
-          iter.return?.();
-          iterDb.close();
+          iter?.return?.();
+          iterDb?.close();
         }
         cb(undefined, value);
       },
       end: (cb: () => void) => {
-        iter.return?.();
-        iterDb.close();
+        iter?.return?.();
+        iterDb?.close();
         cb?.();
       },
       async * [Symbol.asyncIterator]() {
@@ -141,7 +142,7 @@ export default class LevelSQLite {
         try { while ((value = iter.next() as IteratorResult<[string]>) && !value.done) { yield value.value; } }
         finally {
           iter.return?.();
-          iterDb.close();
+          iterDb?.close();
         }
       },
     };
@@ -160,7 +161,8 @@ export default class LevelSQLite {
   }
 
   close(): void {
-    this.db.close();
-    this.iterDb.close();
+    this.open = false;
+    this.db?.close();
+    this.iterDb?.close();
   }
 }

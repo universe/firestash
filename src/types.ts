@@ -29,7 +29,6 @@ export interface IFireStash {
   watchers(): Promise<string[]>;
   allSettled(): Promise<void>;
   stash(collection: string): Promise<IFireStashPage>;
-  onSnapshot<Document = any>(documentPath: string, callback: (snapshot?: Document) => any, timeout?: number): Promise<() => void>;
   watch(collection: string): Promise<() => void>;
   unwatch(collection: string): Promise<void>;
   stop(): Promise<void>;
@@ -89,8 +88,6 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
    * @param collection Collection Path
    */
   abstract stash(collection: string): Promise<IFireStashPage>;
-
-  abstract onSnapshot<Document = any>(documentPath: string, callback: (snapshot?: Document) => any, timeout?: number): Promise<() => void>;
 
   /**
    * Watch for updates from a collection stash.
