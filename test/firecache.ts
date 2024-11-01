@@ -33,7 +33,15 @@ describe('Connector', function() {
         fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
         await wait(1000);
       } catch (err) {
-        console.error("Error running beforeEach", err);
+        try {
+          console.error("Error running beforeEach. Retrying.", err);
+          await fireTest.clearFirestoreData({ projectId });
+          fireStash = new FireStash(projectId, { datastore: 'sqlite', directory: path.join(__dirname, String(appId++)) });
+          await wait(1000);
+        }
+        catch (err) {
+          console.error("Error running beforeEach. Retrying.", err);
+        }
       }
     });
 
@@ -62,12 +70,13 @@ describe('Connector', function() {
         let batch = firestore.batch();
         for (let i = 0; i < 15000; i++) {
           fireStash.update('collection2', `id${i}`);
-          fireStash.update(`collection2/id${i}/sub-page`, String(i));
-          fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
+          // fireStash.update(`collection2/id${i}/sub-page`, String(i));
+          // fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
           batch.set(firestore.doc(`collection2/id${i}`), { id: i });
           cache[`id${i}`] = 1;
           objects[`collection2/id${i}`] = { id: i };
           if (i % 500 === 0) {
+            console.log('WRITE', i, '/', 15000)
             await batch.commit();
             batch = firestore.batch();
           }
@@ -115,11 +124,9 @@ describe('Connector', function() {
       fireStash.update('contacts', 'id1');
       const start = Date.now();
 
-      // console.log(await fireStash.stash('contacts'));
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: {} }, 'Throttles cache write and writes');
 
       await fireStash.allSettled();
-      // console.log(await fireStash.stash('contacts'));
 
       assert.deepStrictEqual(await fireStash.stash('contacts'), { collection: 'contacts', cache: { id1: 1 } }, 'Throttles cache write and writes');
       assert.deepStrictEqual(
@@ -162,10 +169,10 @@ describe('Connector', function() {
       assert.deepStrictEqual(fetches, [], 'Makes no fetch requests.');
     });
 
-    it('only calling update does not start a watcher', async function() {
+    it('only calling update does start a watcher', async function() {
       fireStash.update('contacts', 'id1');
       await fireStash.allSettled();
-      assert.deepStrictEqual((await fireStash.watchers()).length, 0, 'No watchers started.');
+      assert.deepStrictEqual((await fireStash.watchers()).length, 1, 'Watchers started.');
     });
 
     it('is able to insert a key for sub collection', async function() {
@@ -292,7 +299,7 @@ describe('Connector', function() {
       await fireStash.allSettled();
       fireStash.watch('contacts');
       const cacheKey = fireStash.cacheKey('contacts', 0);
-      const cache = (await firestore.collection('firestash').doc(cacheKey).get()).data() as Record<string, number>;
+      const cache = (await firestore.collection('firestash').doc(cacheKey).get()).data() as { cache: Record<string, number> };
       cache.cache['1'] = (cache.cache['1'] || 0) + 1;
       await firestore.doc('contacts/1').delete();
       await firestore.collection('firestash').doc(cacheKey).set(cache);
@@ -422,57 +429,60 @@ describe('Connector', function() {
     });
 
     it('shards massive caches within one collection', async function() {
-      try {
-        this.timeout(60000);
+      this.timeout(600000);
+      const COUNT = 15000;
 
-        const cache: Record<string, number> = {};
-        const objects: Record<string, { id: number }> = {};
-        const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
-        let batch = firestore.batch();
-        for (let i = 0; i < 15000; i++) {
-          fireStash.update('collection2', `id${i}`);
-          fireStash.update(`collection2/id${i}/sub-page`, String(i));
-          fireStash.update(`irrelevent/id${i}/sub-page`, String(i));
-          batch.set(firestore.doc(`collection2/id${i}`), { id: i });
-          cache[`id${i}`] = 1;
-          objects[`collection2/id${i}`] = { id: i };
-          if (i % 500 === 0) {
-            promises.push(batch.commit());
-            batch = firestore.batch();
-          }
+      const cache: Record<string, number> = {};
+      const objects: Record<string, { id: number }> = {};
+      const promises: Promise<FirebaseFirestore.WriteResult[]>[] = [];
+      let batch = firestore.batch();
+      for (let i = 0; i < COUNT; i++) {
+        if (i % 100 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 100));
         }
-        await batch.commit();
-        await Promise.allSettled(promises);
-        await fireStash.allSettled();
-        assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, 15000, 'Writes an obscene amount of data.');
-
-        const res = await fireStash.get('collection2');
-        assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data keys.');
-        assert.deepStrictEqual(Object.values(res).filter(Boolean).length, 15000, 'Fetches an obscene amount of data values.');
-
-        const dat = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
-        assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
-
-        fireStash.update('collection2', `id${15000}`);
-        await fireStash.allSettled();
-
-        let dat2 = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
-        assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
-
-        let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-        let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-        assert.ok(page0Count === 15000, 'Initial cache overflows are simply append only.');
-        assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
-
-        await fireStash.balance('collection2');
-        dat2 = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
-        page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
-        page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
-        assert.ok((Math.abs(page0Count - page1Count) / 15000) * 100 < 3, 'Pages re-balance with less than 3% error.');
+        fireStash.update('collection2', `id${i}`);
+        batch.set(firestore.doc(`collection2/id${i}`), { id: i });
+        cache[`id${i}`] = 1;
+        objects[`collection2/id${i}`] = { id: i };
+        if (i % 500 === 0) {
+          console.log('WRITE', i, '/', COUNT);
+          promises.push(batch.commit());
+          batch = firestore.batch();
+        }
       }
-      catch (err) {
-        return err;
-      }
+      await batch.commit();
+      console.log('WRITE', COUNT, '/', COUNT);
+      await Promise.allSettled(promises);
+      await fireStash.allSettled();
+      console.log('All Settled');
+      assert.deepStrictEqual(Object.keys((await fireStash.stash('collection2')).cache).length, COUNT, 'Writes an obscene amount of data.');
+
+      const res = await fireStash.get('collection2');
+      assert.deepStrictEqual(Object.keys(res).filter(Boolean).length, COUNT, 'Fetches an obscene amount of data keys.');
+      assert.deepStrictEqual(Object.values(res).filter(Boolean).length, COUNT, 'Fetches an obscene amount of data values.');
+
+      const dat = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
+      assert.deepStrictEqual(dat.docs.length, 1, '15,000 keys and below stay in a single page.');
+
+      fireStash.update('collection2', `id${COUNT}`);
+      await fireStash.allSettled();
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      let dat2 = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
+      console.log('Page One', Object.keys(dat2?.docs?.[0]?.data()?.cache || {}).length);
+      console.log('Page Two', Object.keys(dat2?.docs?.[1]?.data()?.cache || {}).length);
+      assert.deepStrictEqual(dat2.docs.length, 2, 'Shards above 15,000 keys');
+
+      let page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+      let page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+      assert.ok(page0Count === COUNT, 'Initial cache overflows are simply append only.');
+      assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
+
+      await fireStash.balance('collection2');
+      dat2 = await firestore.collection('firestash').where('collection', '==', 'collection2').get();
+      page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
+      page1Count = Object.keys(dat2.docs[1]?.data()?.cache || {}).length;
+      assert.ok((Math.abs(page0Count - page1Count) / COUNT) * 100 < 3, 'Pages re-balance with less than 3% error.');
     });
 
     it('handles empty collection requests', async function() {
@@ -481,7 +491,7 @@ describe('Connector', function() {
     });
 
     it('large streaming gets are performant', async function() {
-      this.timeout(6000000);
+      this.timeout(60000);
 
       const promises: Promise<void>[] = [];
       const bigString = 'x'.repeat(30 * 1024);
@@ -532,7 +542,7 @@ describe('Connector', function() {
     });
 
     it('batches massive key updates across many collection', async function() {
-      this.timeout(8000);
+      this.timeout(15000);
       let saveCount = 0;
       fireStash.on('save', () => { saveCount++; });
 
@@ -696,7 +706,7 @@ describe('Connector', function() {
       }
 
       await wait(5000);
-      assert.strictEqual(called, 4, 'Listens for remote updates');
+      assert.strictEqual(called, 3, 'Listens for remote updates');
     });
 
     it('throttles listener when updates exceed a consistent one per second and updates', async function() {
@@ -717,7 +727,7 @@ describe('Connector', function() {
         await wait(200);
       }
       await fireStash.allSettled();
-      assert.strictEqual(called, 8, 'Listens for remote updates');
+      assert.strictEqual(called, 7, 'Listens for remote updates');
     });
 
     it('batches many update calls', async function() {

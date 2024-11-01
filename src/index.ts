@@ -5,23 +5,25 @@ import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 
 import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
-import { cacheKey } from './lib.js';
+import FireStashLib, { cacheKey } from './lib.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
-  #worker: ChildProcess;
+  #worker: ChildProcess | null = null;
   #messageId = 0;
-  #tasks: Record<number, [(value: any) => void, (err: Error) => void]> = {};
-  #iterators: Record<number, [(res: { value: [string, any | null]; done: boolean }) => any, (val: any) => void]> = {};
+  #tasks: Record<number | string, [(value: any) => void, (err: Error) => void, string]> = {};
+  #iterators: Record<number | string, [(res: { value: [string, any | null]; done: boolean }) => any, (val: any) => void]> = {};
   #listeners: Record<string, (snapshot?: unknown) => any> = {};
 
-  app: Firebase.app.App;
-  db: Firebase.firestore.Firestore;
-  firebase: typeof Firebase;
+  app!: Firebase.app.App;
+  db!: Firebase.firestore.Firestore;
+  firebase!: typeof Firebase;
 
   constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
     super(project, options);
+
+    if (options?.worker === false) { return new FireStashLib(project, options) as unknown as FireStash; }
 
     // Bind listener methods.
     this.onWorkerMessage = this.onWorkerMessage.bind(this);
@@ -33,7 +35,7 @@ export default class FireStash extends AbstractFireStash {
       [ JSON.stringify(project), JSON.stringify(options || {}), String(process.pid) ],
       process.env.NODE_ENV === 'development' ? { execArgv: ['--inspect=40894'], serialization: 'advanced' } : { serialization: 'advanced' },
     );
-    this.#worker.on('message', this.onWorkerMessage);
+    this.#worker?.on?.('message', this.onWorkerMessage);
 
     // Start our own firebase connection for in-process access.
     const creds = typeof project === 'string' ? { projectId: project } : { projectId: project?.projectId, credential: project ? Firebase.credential.cert(project) : undefined };
@@ -52,14 +54,14 @@ export default class FireStash extends AbstractFireStash {
   }
 
   private killWorker() {
-    this.#worker.killed || this.#worker.kill();
+    this.#worker?.killed || this.#worker?.kill?.();
   }
 
   private async onWorkerMessage([ type, id, res, err ]: ['method' | 'snapshot' | 'iterator'| 'event', string, any, string]) {
     if (type === 'method') {
       const cb = this.#tasks[id];
       delete this.#tasks[id];
-      err ? cb[1](err) : cb[0](res);
+      err ? cb[1](new Error(err)) : cb[0](res);
     }
     else if (type === 'event') { this.emit(id, ...res); }
     else if (type === 'snapshot') { this.#listeners[id]?.(res); }
@@ -76,8 +78,8 @@ export default class FireStash extends AbstractFireStash {
   ): Promise<Awaited<ReturnType<IFireStash[M]>>> {
     return new Promise<Awaited<ReturnType<IFireStash[M]>>>((resolve: (value: Awaited<ReturnType<IFireStash[M]>>) => void, reject: (err: Error) => void) => {
       const id = this.#messageId = (this.#messageId + 1) % Number.MAX_SAFE_INTEGER;
-      this.#tasks[id] = [ resolve, reject ];
-      this.#worker.send([ id, message ]);
+      this.#tasks[id] = [ resolve, reject, message[0] ];
+      this.#worker?.send?.([ id, message ]);
     });
   }
 
@@ -104,10 +106,10 @@ export default class FireStash extends AbstractFireStash {
         this.runInWorker([ 'stop', []]).then(resolve);
       })
     } catch {
-      this.#worker.connected && this.#worker.disconnect();
-      this.#worker.killed || this.#worker.kill();
+      this.#worker?.connected && this.#worker?.disconnect?.();
+      this.#worker?.killed || this.#worker?.kill?.();
     }
-    this.#worker.off('message', this.onWorkerMessage);
+    this.#worker?.off?.('message', this.onWorkerMessage);
     process.off('exit', this.killWorker);
     process.off('SIGHUP', this.killWorker);
     process.off('SIGINT', this.killWorker);
@@ -115,8 +117,8 @@ export default class FireStash extends AbstractFireStash {
 
     // Stop the in-process firebase app.
     await this.app?.delete();
-    for (const [, reject] of Object.values(this.#tasks)) {
-      reject(new Error('FireStash Stopped'));
+    for (const [resolve, reject, method] of Object.values(this.#tasks)) {
+      method === 'stop' ? resolve(void 0) : reject(new Error('FireStash Stopped'));
     }
     for (const [, reject] of Object.values(this.#iterators)) {
       reject(new Error('FireStash Stopped'));
@@ -136,7 +138,7 @@ export default class FireStash extends AbstractFireStash {
       while (!val.done) {
         val = await new Promise<{ value: [string, T | null]; done: boolean }>((resolve, reject) => {
           this.#iterators[iteratorId] = [ resolve, reject ];
-          this.#worker.send([ iteratorId, [ 'stream', firstRun ? [ collection, id, filter ] : null ]]);
+          this.#worker?.send?.([ iteratorId, [ 'stream', firstRun ? [ collection, id, filter ] : null ]]);
         });
         firstRun = false;
         if (val.done) { break; }
@@ -144,7 +146,7 @@ export default class FireStash extends AbstractFireStash {
       }
     }
     finally {
-      this.#worker.send([ iteratorId, [ 'stream-end', null ]]);
+      this.#worker?.send?.([ iteratorId, [ 'stream-end', null ]]);
     }
   }
 

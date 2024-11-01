@@ -7,6 +7,7 @@ export interface FireStashOptions {
   datastore: 'sqlite' | 'rocksdb' | 'leveldown' | 'memdown';
   readOnly: boolean;
   lowMem: boolean;
+  worker: boolean;
   directory: string | null;
 }
 
@@ -19,6 +20,7 @@ const DEFAULT_OPTIONS: FireStashOptions = {
   datastore: 'sqlite',
   readOnly: false,
   lowMem: false,
+  worker: true,
   directory: null,
 };
 

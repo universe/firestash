@@ -67,7 +67,7 @@ function encode(key: string) {
 export function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
 
 const PAGINATION = 15000;
-const BATCH_SIZE = 10;
+// const BATCH_SIZE = 10;
 function pageSize(): number {
   return process.env.FIRESTASH_PAGINATION || PAGINATION;
 }
@@ -126,7 +126,7 @@ export default class FireStash extends AbstractFireStash {
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db.settings({ ignoreUndefinedProperties: true });
-    if (this.options.datastore === 'sqlite' && this.dir) {
+    if (!this.options.lowMem && this.options.datastore === 'sqlite' && this.dir) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.level = new LevelSQLite(path.join(this.dir, '.firestash.db'));
     }
@@ -153,15 +153,6 @@ export default class FireStash extends AbstractFireStash {
 
   private stashPagesMemo: Record<string, Record<string, IFireStashPage | undefined>> = {};
   private async stashPages(collection: string): Promise<Record<string, IFireStashPage | undefined>> {
-    if (this.options.lowMem) {
-      const out: Record<string, IFireStashPage> = {};
-      const res = await this.db.collection('firestash').where('collection', '==', collection).get();
-      for (const doc of res.docs) {
-        const dat = doc.data() as IFireStashPage | undefined;
-        dat && (out[doc.id] = dat);
-      }
-      return out;
-    }
     if (this.stashPagesMemo[collection]) { return this.stashPagesMemo[collection]; }
     try {
       return this.stashPagesMemo[collection] = (reify(await this.level.get(collection, { asBuffer: true }) || null) as Record<string, IFireStashPage>) || {};
@@ -171,13 +162,23 @@ export default class FireStash extends AbstractFireStash {
     }
   }
 
+  private async hasKey(collection: string, key: string): Promise<boolean> {
+    await this.watch(collection);
+    for (const stash of Object.values(await this.stashPages(collection))) {
+      if (Object.hasOwnProperty.call(stash?.cache || {}, key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Get the entire stash cache for a collection.
    * @param collection Collection Path
    */
   private stashMemo: Record<string, IFireStashPage> = {};
   async stash(collection: string): Promise<IFireStashPage> {
-    if (!this.options.lowMem && this.stashMemo[collection]) { return this.stashMemo[collection]; }
+    if (this.stashMemo[collection]) { return this.stashMemo[collection]; }
 
     const pages = await this.stashPages(collection);
     const out: IFireStashPage = { collection, cache: {} };
@@ -190,7 +191,7 @@ export default class FireStash extends AbstractFireStash {
       }
     }
 
-    return this.options.lowMem ? out : (this.stashMemo[collection] = out);
+    return (this.stashMemo[collection] = out);
   }
 
   /**
@@ -205,7 +206,7 @@ export default class FireStash extends AbstractFireStash {
     if (this.#pendingUpdates.size > 10 && this.showWarning) {
       this.showWarning = false
       this.log.warn('[FireStash] Warning: cache save has exceeded 10 writes per second.');
-      this.log.warn('            This is likely not an issue but may be an indication of a hot code path that can be optimized.');
+      this.log.warn('            This is a sign of a hot code path that can be optimized.');
       this.log.warn('            Key Sample:\n', [...this.toUpdate.keys()].slice(0, 10).map(k => `             - ${k}`).join('\n'));
     }
     if (this.#pendingUpdates.size < 5 && !this.showWarning) {
@@ -213,58 +214,38 @@ export default class FireStash extends AbstractFireStash {
     }
     try {
       await this.drainEventsPromise;
+
       this.timeout = null;
       this.timeoutPromise = null;
-      const FieldValue = this.firebase.firestore.FieldValue;
+
       /* eslint-disable-next-line */
       const promises: Promise<any>[] = [];
-      let docCount = 0;
-      let updateCount = 0;
+      const FieldValue = this.firebase.firestore.FieldValue;
       const updates: Record<string, IFireStashPage<FirebaseFirestore.FieldValue>> = {};
-      let docUpdates: ['set' | 'delete', string, any][] = [];
-      const localBatch = this.level.batch();
       const entries = [...this.toUpdate.entries()];
       const collectionStashes: Map<string, Record<string, IFireStashPage | undefined>> = new Map();
+
+      let docCount = 0;
+      let updateCount = 0;
+      let docUpdates: ['set' | 'delete', string, any][] = [];
 
       // Clear queue for further updates while we work.
       this.toUpdate.clear();
 
       // Ensure we are watching for remote updates. Intentional fire and forget here.
       // We do this at the end of an update queue to not throttle our watchers on many new collection additions.
-      let working: string[] = [];
-      const collectionStashPromises = entries.map(async([collection], i) => {
-        // If this collection has a watcher, we know we're up to date with latest as all times. Use existing.
-        if (this.#watchers.has(collection)) {
-          collectionStashes.set(collection, await this.stashPages(collection));
-          return;
-        }
+      const collectionStashPromises = entries.map(async([collection]) => {
+        // If we encounter a collection, it's always better on memory to set up a watcher instead of reading each time.
+        if (!this.#watchers.has(collection)) { await this.watch(collection); }
 
-        // Push this collection name to our "to fetch" list
-        working.push(collection);
-
-        // Once we hit the limits of Firebase batch get queries, or the end of the list, fetch the latest stash cash.
-        if (working.length === BATCH_SIZE || i === (entries.length - 1)) {
-          const keywords = [...working];
-          working = [];
-          const stashes = await this.db.collection('firestash').where('collection', 'in', keywords).get();
-          for (const stash of stashes.docs) {
-            const data = stash.data() as IFireStashPage | undefined;
-            if (!data) { continue; }
-            const pageStashes = collectionStashes.get(data.collection) || {};
-            collectionStashes.set(data.collection, pageStashes);
-            pageStashes[stash.id] = data;
-          }
-          for (const collection of keywords) {
-            if (collectionStashes.has(collection)) { continue; }
-            collectionStashes.set(collection, { [cacheKey(collection, 0)]: { collection, cache: {} } });
-          }
-        }
+        // Because we have a watcher, we know we're up to date with latest as all times! Use existing stash pages.
+        collectionStashes.set(collection, await this.stashPages(collection));
       });
 
       // Wait to ensure we have all the latest stash caches.
       // We need this to ensure all we know what page to increment the generation number on.
       await Promise.allSettled(collectionStashPromises);
-
+      const localBatch = this.level.batch();
       const events: Map<string, Set<string>> = new Map();
       const commits: Promise<void>[] = [];
       try {
@@ -275,27 +256,12 @@ export default class FireStash extends AbstractFireStash {
 
           // Get the stash's page and document count.
           let pageCount = Object.keys(localStash).length;
-          let documentCount = 0;
-          for (const dat of Object.values(localStash)) {
-            if (!dat) { continue; }
-            documentCount += Object.keys(dat.cache || {}).length;
-          }
 
           // For each key queued, set the cache object.
           for (const [ key, objects ] of keys.entries()) {
-            // Increment our document count to trigger page overflows in batched writes.
-            documentCount += 1;
-
-            // Expand the cache object pages to fit the page count balance.
-            while (pageCount < Math.ceil(documentCount / pageSize())) {
-              const pageName = cacheKey(collection, pageCount);
-              await this.db.collection('firestash').doc(pageName).set({ collection, cache: {} }, { merge: true });
-              localStash[pageName] = { collection, cache: {} };
-              pageCount += 1;
-            }
 
             // Calculate the page we're adding to. In re-balance this is a md5 hash as decimal, mod page size, but on insert we just append to the last page present.
-            let pageIdx = pageCount - 1;
+            let pageIdx = Math.max(pageCount - 1, 0);
 
             // Check to make sure this key doesn't already exist on remote. If it does, use its existing page.
             // TODO: Perf? This is potentially a lot of looping.
@@ -313,7 +279,13 @@ export default class FireStash extends AbstractFireStash {
             }
 
             // Get our final cache page destination.
-            const pageName = cacheKey(collection, pageIdx);
+            let pageName = cacheKey(collection, pageIdx);
+
+            // If adding this key would put our key count over 15,000, create a new page.
+            if (!localStash[pageName]?.cache?.[key] && Object.keys(localStash[pageName]?.cache || {}).length >= pageSize()) {
+              pageIdx = pageIdx + 1;
+              pageName = cacheKey(collection, pageIdx);
+            }
 
             // If this page does not exist in our update yet, add one extra write to our count for ensuring the collection name.
             if (!updates[pageName]) { docCount++; }
@@ -321,7 +293,7 @@ export default class FireStash extends AbstractFireStash {
             // Update remote object.
             const update: IFireStashPage<FirebaseFirestore.FieldValue> = updates[pageName] = updates[pageName] || { collection, cache: {} };
             update.cache[key] = FieldValue.increment(1);
-            updateCount += 1;
+            updateCount++;
 
             // Keep our local stash in sync to prevent unnessicary object syncs down the line.
             const page = localStash[pageName] = localStash[pageName] || { collection, cache: {} };
@@ -345,7 +317,6 @@ export default class FireStash extends AbstractFireStash {
                     const id = `${collection}/${key}`;
                     setDirty(localObj);
                     localBatch.put(id, localObj);
-                    // this.documentMemo.set(id, localObj);
                   });
                 }
                 const keys = events.get(collection) || new Set();
@@ -395,9 +366,9 @@ export default class FireStash extends AbstractFireStash {
           }
 
           // Queue a commit of our collection's local state.
+          this.stashPagesMemo[collection] = localStash;
           if (!this.options.lowMem) {
             localStash ? localBatch.put(collection, stringify(localStash)) : localBatch.del(collection);
-            this.stashPagesMemo[collection] = localStash;
           }
 
           // Re-calculate stashMemo on next stash() request.
@@ -483,6 +454,7 @@ export default class FireStash extends AbstractFireStash {
               i = 0;
             }
           }
+
           if (Object.keys(batchUpdates[pageId].cache || {}).length) {
             batch.set(this.db.collection('firestash').doc(pageId), batchUpdates[pageId], { merge: true });
           }
@@ -512,8 +484,6 @@ export default class FireStash extends AbstractFireStash {
       }
 
       await Promise.all(commits);
-
-      this.options.lowMem && collectionStashes.clear();
     }
     catch (err) {
       this.log.error('Error running saveCacheUpdate', err);
@@ -557,19 +527,21 @@ export default class FireStash extends AbstractFireStash {
     }
 
     // Update the Cache Stash. For every updated object, delete it from our stash to force a re-fetch on next get().
-    const batch = this.level.batch();
-    batch.put(collection, stringify(local));
-    !this.options.lowMem && (this.stashPagesMemo[collection] = local);
+    this.stashPagesMemo[collection] = local;
 
     // Re-compute on next stash() request.
     delete this.stashMemo[collection];
 
-    for (const [ collection, id ] of modified) {
-      const obj = await this.safeGet(collection, id) || Buffer.from('1{}');
-      setDirty(obj);
-      batch.put(`${collection}/${id}`, obj);
+    if (!this.options.lowMem) {
+      const batch = this.level.batch();
+      batch.put(collection, stringify(local));
+      for (const [ collection, id ] of modified) {
+        const obj = await this.safeGet(collection, id) || Buffer.from('1{}');
+        setDirty(obj);
+        batch.put(`${collection}/${id}`, obj);
+      }
+      await batch.write();
     }
-    await batch.write();
 
     // Destroy our memoized get() request if it exists for everything that has changed to ensure we fetch latest on next call.
     // Queue our events for a trigger.
@@ -604,9 +576,9 @@ export default class FireStash extends AbstractFireStash {
 
   private async handleSnapshot(documentPath: string, snapshot: FirebaseFirestore.DocumentSnapshot) {
     const listener = this.documentListeners.get(documentPath);
-    const data = snapshot.data();
     if (!listener) return;
 
+    const data = snapshot.data();
     const now = snapshot.updateTime?.toMillis() || 0;
     const changed = !listener.data || now !== (listener.data?.updateTime?.toMillis() || 0);
     if (listener.releaseSnapshot) {
@@ -675,7 +647,6 @@ export default class FireStash extends AbstractFireStash {
     const query = this.db.collection('firestash').where('collection', '==', collection);
     const handleSnapshot = async(update: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>) => {
       let isFirst = false;
-
       if (this.watcherStarters[collection]) {
         // If successfully completed first run.
         if (this.watcherStarters[collection] === localPromise) {
@@ -727,7 +698,7 @@ export default class FireStash extends AbstractFireStash {
       isFirst && resolve?.(() => this.unwatch(collection));
     };
 
-    liveWatcher = query.onSnapshot(handleSnapshot, (err) => {
+    liveWatcher = query.onSnapshot(handleSnapshot, (err: Error) => {
       if (this.watcherStarters[collection] && this.watcherStarters[collection] === localPromise) {
         delete this.watcherStarters[collection];
       }
@@ -801,14 +772,11 @@ export default class FireStash extends AbstractFireStash {
     process.off('SIGTERM', () => this.stop);
   }
 
-  // private documentMemo = new LRU<string, Buffer>({ max: 1000, maxSize: 400_000_000, sizeCalculation: b => b.length });
   private async safeGet(collection: string, key: string): Promise<Buffer | null> {
     const id = `${collection}/${key}`;
-    // if (this.documentMemo.has(id)) { return this.documentMemo.get(id) || null; }
     if (this.options.lowMem) { return null; }
     try {
       const o = await this.level.get(id, { asBuffer: true }) || null;
-      // !this.options.lowMem && (this.documentMemo.set(id, o));
       return o;
     }
     catch (_err) { return null; }
@@ -879,13 +847,14 @@ export default class FireStash extends AbstractFireStash {
     const modified: Set<string> = new Set();
 
     // Ensure we're getting the latest stash data for this collection.
-    !this.options.lowMem && await this.watch(collection);
-    const stash = await this.stash(collection);
+    await this.watch(collection);
 
     if (this.options.lowMem) {
-      const ids = id ? idArr : Object.keys(stash.cache);
-      for (const id of ids) {
-        modified.add(id);
+      for (const stash of Object.values(await this.stashPages(collection))) {
+        const ids = id ? idArr : Object.keys(stash?.cache || {});
+        for (const id of ids) {
+          modified.add(id);
+        }
       }
     }
     else if (ids.size > 0 && ids.size <= 30) {
@@ -898,8 +867,7 @@ export default class FireStash extends AbstractFireStash {
           modified.add(id);
         }
         else {
-          const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-          docMightExist && modified.add(id);
+          await this.hasKey(collection, id) && modified.add(id);
         }
       }
     }
@@ -934,8 +902,7 @@ export default class FireStash extends AbstractFireStash {
           // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
           // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
           if (!record) {
-            const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-            docMightExist && modified.add(key);
+            await this.hasKey(collection, key) && modified.add(key);
           }
 
           // If dirty, queue for fetch, otherwise add to our JSON return.
@@ -958,8 +925,7 @@ export default class FireStash extends AbstractFireStash {
           // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
           // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
           if (!err) {
-            const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-            docMightExist && modified.add(key);
+            await this.hasKey(collection, key) && modified.add(key);
           }
         }
       }
@@ -977,12 +943,10 @@ export default class FireStash extends AbstractFireStash {
           setClean(data);
           batch.put(id, data);
           if (filter && !data.includes(filter)) { continue; }
-          // !this.options.lowMem && (this.documentMemo.set(id, data));
           yield [ doc.id, obj ];
         }
         else {
           batch.del(id);
-          // this.documentMemo.delete(id);
         }
       }
       await batch.write();
@@ -1015,11 +979,12 @@ export default class FireStash extends AbstractFireStash {
 
       // Ensure we're getting the latest stash data for this collection.
       !this.options.lowMem && await this.watch(collection);
-      const stash = await this.stash(collection);
       if (this.options.lowMem) {
-        const ids = id ? idArr : Object.keys(stash.cache);
-        for (const id of ids) {
-          modified.add(id);
+        for (const stash of Object.values(await this.stashPages(collection))) {
+          const ids = id ? idArr : Object.keys(stash?.cache || {});
+          for (const id of ids) {
+            modified.add(id);
+          }
         }
       }
       else if (ids.size > 0 && ids.size <= 30) {
@@ -1032,8 +997,7 @@ export default class FireStash extends AbstractFireStash {
             modified.add(id);
           }
           else {
-            const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-            docMightExist && modified.add(id);
+            await this.hasKey(collection, id) && modified.add(id);
           }
         }
       }
@@ -1067,8 +1031,7 @@ export default class FireStash extends AbstractFireStash {
           // If something went wrong reading the doc, mark it for fetching if we are watching for the latest updates in the ledger,
           // or if the property is tracked in the ledger, implying we have it on the remote server but not tracked locally.
           if (!record) {
-            const docMightExist = !this.#watchers.get(collection) || Object.hasOwnProperty.call(stash.cache, id);
-            docMightExist && modified.add(key);
+            await this.hasKey(collection, key) && modified.add(key);
           }
 
           // If dirty, queue for fetch, otherwise add to our JSON return.
@@ -1095,11 +1058,9 @@ export default class FireStash extends AbstractFireStash {
             const data = stringify(obj);
             setClean(data);
             batch.put(id, data);
-            // !this.options.lowMem && (this.documentMemo.set(id, data));
           }
           else {
             batch.del(id);
-            // this.documentMemo.delete(id);
           }
         }
         await batch.write();
@@ -1131,7 +1092,6 @@ export default class FireStash extends AbstractFireStash {
           }
           localObj = stringify(val);
           localObj && setClean(localObj);
-          // this.documentMemo.set(id, localObj);
           (localObj === null) ? batch.del(id) : batch.put(id, localObj);
         }
         this.emit(id, collection, [key]);
@@ -1154,7 +1114,7 @@ export default class FireStash extends AbstractFireStash {
       this.timeout = setTimeout(() => this.saveCacheUpdate().then(resolve, reject), 100);
     });
 
-    // Queue update for next remote data sync (1 per second)
+    // Queue update for next remote data sync (10 per second)
     const keys = this.toUpdate.get(collection) || new Map();
     this.toUpdate.set(collection, keys);
     const updates = keys.get(key) || [];
@@ -1239,6 +1199,7 @@ export default class FireStash extends AbstractFireStash {
     // Ensure we are watching for remote updates.
     const pages = await this.db.collection('firestash').where('collection', '==', collection).get();
     const localPages = await this.stashPages(collection);
+    await this.unwatch(collection);
     delete this.stashPagesMemo[collection];
     delete this.stashMemo[collection];
 
@@ -1272,10 +1233,9 @@ export default class FireStash extends AbstractFireStash {
       await this.allSettled();
       return;
     }
-    const stash = (await this.stash(collection)) || { collection, cache: {} };
     const docs = (await this.db.collection(collection).get()).docs;
     for (const doc of docs) {
-      if ((key && key !== doc.id) || stash.cache[doc.id]) { continue; }
+      if ((key && key !== doc.id) || await this.hasKey(collection, doc.id)) { continue; }
       this.update(collection, doc.id);
     }
     await this.allSettled();
