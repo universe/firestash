@@ -10,7 +10,7 @@ import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptio
 
 export { cacheKey, type FirebaseConfig, type FireStashOptions }
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const __dirname = fileURLToPath(import.meta.url);
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
