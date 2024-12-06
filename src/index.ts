@@ -10,9 +10,10 @@ import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptio
 
 export { cacheKey, type FirebaseConfig, type FireStashOptions }
 
-// add comment as to why this needs to be a function
 function getDirname() {
-  return fileURLToPath(import.meta.url);
+  const parts = fileURLToPath(import.meta.url).split('/');
+  parts.pop();
+  return parts.join('/');
 }
 
 const IS_DEV = process.env.NODE_ENV !== 'production';
