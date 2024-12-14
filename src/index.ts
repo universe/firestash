@@ -10,7 +10,12 @@ import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptio
 
 export { cacheKey, type FirebaseConfig, type FireStashOptions }
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+function getDirname() {
+  const parts = fileURLToPath(import.meta.url).split('/');
+  parts.pop();
+  return parts.join('/');
+}
+
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
@@ -28,7 +33,7 @@ export default class FireStash extends AbstractFireStash {
   constructor(config: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super(config, options);
     this.#worker = fork(
-      path.join(__dirname, './worker.js'),
+      path.join(getDirname(), './worker.js'),
       [ JSON.stringify(config || {}), JSON.stringify(options || {}), String(process.pid) ],
       // IS_DEV ? { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], } : { serialization: 'advanced', execArgv: ['--inspect-brk=40894'], },
       IS_DEV ? { serialization: 'advanced' } : { serialization: 'advanced' },
