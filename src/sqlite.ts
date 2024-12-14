@@ -13,17 +13,20 @@ export interface LevelSQLiteIterator {
   [Symbol.asyncIterator](): AsyncIterableIterator<[string]>;
 }
 
+const PAGINATION_SIZE = 30;
+
 function initDb(path: string, readonly: boolean): Database {
   if (!SQLiteConstructor) { throw new Error('Missing optional peer dependency "better-sqlite3".'); }
   let db: Database;
-  try { db = new SQLiteConstructor(path, { readonly }); }
+  try { db = new SQLiteConstructor(path, { readonly, timeout: 60000 }); }
   catch {
     fs.existsSync(path) && fs.unlinkSync(path);
     fs.existsSync(`${path}-shm`) && fs.unlinkSync(`${path}-shm`);
     fs.existsSync(`${path}-wal`) && fs.unlinkSync(`${path}-wal`);
-    db = new SQLiteConstructor(path);
+    db = new SQLiteConstructor(path, { readonly, timeout: 60000 });
   }
   db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = OFF');
   db.unsafeMode(true);
   if (!readonly) {
     db.exec(`
@@ -46,30 +49,36 @@ export default class LevelSQLite {
   private _getAll: Statement;
   private _put: Statement;
   private _del: Statement;
+  private _ensure: Statement;
+  private _markDirty: Statement;
   constructor(path: string) {
     this.path = path;
     this.db = initDb(path, false);
     this.iterDb = initDb(path, true);
     this._get = this.db.prepare<[string]>('SELECT "value" FROM "store" WHERE "key" = ?').pluck();
-    this._getAll = this.db.prepare<[string[]]>(`SELECT "key", "value" FROM "store" WHERE "key" IN (${new Array(100).fill('?').join(', ')})`);
+    this._getAll = this.db.prepare<[string[]]>(`SELECT "key", "value" FROM "store" WHERE "key" IN (${new Array(PAGINATION_SIZE).fill('?').join(', ')})`);
     this._put = this.db.prepare<{ key: string; value: Buffer; }>('INSERT INTO "store" ("key","value") VALUES (@key, @value) ON CONFLICT ("key") DO UPDATE SET "value" = @value;');
     this._del = this.db.prepare<[string]>('DELETE FROM "store" WHERE "key" = ?');
+    this._ensure = this.db.prepare<[string]>("INSERT OR IGNORE INTO store (key, value) VALUES (?, '1{}')");
+    this._markDirty = this.db.prepare<[string]>(`UPDATE store SET value = '1' || substr(value, 2) WHERE key = ?`);
   }
 
   async get(key: string, _options?: { asBuffer?: boolean }, cb?: (err: Error | undefined, value: Buffer | null) => void): Promise<Buffer | undefined> {
+    if (!this.db.open) { return; }
     const res = this._get.get(key) as Buffer || undefined;
     cb?.(undefined, res);
     return res;
   }
 
   async getMany(keys: string[], _options?: { asBuffer?: boolean }, cb?: (err: Error | undefined, value: Buffer[] | null) => void): Promise<(Buffer | undefined)[]> {
-    const data = new Array(100);
+    if (!this.db.open) { return []; }
+    const data = new Array(PAGINATION_SIZE);
     const out = new Array(keys.length).fill(null);
     const reverseLookup: Record<string, number> = {};
-    for (let page = 0; page < Math.ceil(keys.length / 100); page++) {
-      for (let idx = 0; idx < 100; idx++) {
-        data[idx] = keys[(page * 100) + idx];
-        reverseLookup[keys[(page * 100) + idx]] = (page * 100) + idx;
+    for (let page = 0; page < Math.ceil(keys.length / PAGINATION_SIZE); page++) {
+      for (let idx = 0; idx < PAGINATION_SIZE; idx++) {
+        data[idx] = keys[(page * PAGINATION_SIZE) + idx];
+        reverseLookup[keys[(page * PAGINATION_SIZE) + idx]] = (page * PAGINATION_SIZE) + idx;
       }
       const res = (this._getAll.all(data) || []) as { key: string; value: string; }[];
       for (const obj of res) {
@@ -81,10 +90,12 @@ export default class LevelSQLite {
   }
 
   async del(key: string): Promise<void> {
+    if (!this.db.open) { return; }
     this._del.run(key);
   }
 
   async put(key: string, value: Buffer | string): Promise<void> {
+    if (!this.db.open) { return; }
     if (typeof value === 'string') { value = Buffer.from(value); }
     this._put.run({ key, value });
   }
@@ -139,7 +150,13 @@ export default class LevelSQLite {
       },
       async * [Symbol.asyncIterator]() {
         let value: IteratorResult<[string]>;
-        try { while ((value = iter.next() as IteratorResult<[string]>) && !value.done) { yield value.value; } }
+        try { 
+          let i = 0;
+          while ((value = iter.next() as IteratorResult<[string]>) && !value.done) {
+            !(++i % 1000) && await new Promise(r => setTimeout(r, 1));
+            yield value.value; 
+          }
+        }
         finally {
           iter.return?.();
           iterDb?.close();
@@ -148,14 +165,25 @@ export default class LevelSQLite {
     };
   }
 
+  async markDirty(key: string): Promise<void> {
+    if (!this.db.open) { return; }
+    this._ensure.run(key);
+    this._markDirty.run(key);
+  }
+
   batch(): LevelSQLiteBatch {
-    // this.db.exec('BEGIN TRANSACTION');
+    const PAGE_SIZE = 100;
+    const ops: [string, Buffer | string | null][] = [];
     return {
-      put: (key: string, value: Buffer | string) => this.put(key, value),
-      del: (key: string) => this.del(key),
-      write: () => {
-        // this.db.exec('COMMIT');
-        return Promise.resolve();
+      put: (key: string, value: Buffer | string) => ops.push([key, value]),
+      del: (key: string) => ops.push([key, null]),
+      write: async() => {
+        for (let idx = 0; idx < ops.length; idx++) {
+          // Time slice our writes so we don't block toooooo much.
+          if (idx % PAGE_SIZE === 0) await new Promise(r => setTimeout(r, 10));
+          const [key, value] = ops[idx];
+          value ? this.put(key, value) : this.del(key);
+        }
       },
     };
   }

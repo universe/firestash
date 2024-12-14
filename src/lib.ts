@@ -1,16 +1,15 @@
 import Firebase from 'firebase-admin';
+import type { WriteResult/*, DocumentReference, DocumentData */ } from 'firebase-admin/firestore';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import deepMerge from 'deepmerge';
 import { nanoid } from 'nanoid';
-// import * as LRU from 'lru-cache';
 import LevelUp from 'levelup';
 import MemDown from 'memdown';
 
 import LevelSQLite from './sqlite.js';
 import AbstractFireStash, { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount } from './types.js';
-import { WriteResult } from 'firebase-admin/firestore';
 
 export type { IFireStash, IFireStashPage, FireStashOptions, ServiceAccount };
 
@@ -35,7 +34,7 @@ declare global {
 // Maximum document size is 1MB. Worst case: 10 documents are safe to send at a time.
 const MAX_BATCH_SIZE = 10;
 const MAX_UPDATE_SIZE = 490;
-const MAX_READ_SIZE = 500;
+// const MAX_READ_SIZE = 500;
 const DELETE_RECORD = Symbol('firestash-delete');
 
 interface ThrottledSnapshot {
@@ -51,7 +50,7 @@ interface ThrottledSnapshot {
 function stringify(json: any): Buffer { return Buffer.from('0' + JSON.stringify(json)); }
 function reify<T = object>(data: Buffer | null) { return data ? JSON.parse(data.toString('utf8', data[0] === 123 ? 0 : 1)) as T : null; } // Character code for "{";
 function isDirty(data: Buffer): boolean { return data[0] !== 49; } // Character code for "0". Is dirty unless first character is "0".
-function isClean(data: Buffer): boolean { return data[0] === 49; } // Character code for "0";
+// function isClean(data: Buffer): boolean { return data[0] === 49; } // Character code for "0";
 function setDirty(data: Buffer): void { data[0] = 48; } // Character code for "1";
 function setClean(data: Buffer): void { data[0] = 49; } // Character code for "0";
 
@@ -132,6 +131,14 @@ export default class FireStash extends AbstractFireStash {
     }
     else {
       this.level = LevelUp((MemDown as any)());
+      (this.level as unknown as LevelSQLite).markDirty = async(key: string) => {
+        let obj = Buffer.from('1{}');
+        try {
+          obj = await this.level.get(key, { asBuffer: true })
+        } catch { 1; }
+        setDirty(obj);
+        await this.level.put(key, obj);
+      }
     }
 
     // Set Immediate is better to use than the default nextTick for newer versions of Node.js.
@@ -297,28 +304,25 @@ export default class FireStash extends AbstractFireStash {
 
             // Keep our local stash in sync to prevent unnessicary object syncs down the line.
             const page = localStash[pageName] = localStash[pageName] || { collection, cache: {} };
-            page.cache[key] = (page.cache[key] || 0) + 1;
 
             // For each object we've been asked to update (run at least once even if no object was presented)...
             for (const obj of objects.length ? objects : [null]) {
               if (obj === DELETE_RECORD) {
+                page.cache[key] = (page.cache[key] || 0) + 1;
                 docUpdates.push([ 'delete', `${collection}/${key}`, null ]);
                 docCount += 1; // +1 for object delete
               }
               else if (obj) {
+                page.cache[key] = (page.cache[key] || 0) + 1;
                 ensureFirebaseSafe(obj, FieldValue);
                 docUpdates.push([ 'set', `${collection}/${key}`, obj ]);
                 docCount += 1; // +1 for object merge
               }
               else {
                 if (!this.options.lowMem) {
-                  this.safeGet(collection, key).then((localObj) => {
-                    localObj = localObj || Buffer.from('1{}');
-                    const id = `${collection}/${key}`;
-                    setDirty(localObj);
-                    localBatch.put(id, localObj);
-                  });
+                  await (this.level as LevelSQLite).markDirty(`${collection}/${key}`)
                 }
+                page.cache[key] = (page.cache[key] || 0);
                 const keys = events.get(collection) || new Set();
                 keys.add(key);
                 events.set(collection, keys);
@@ -510,12 +514,14 @@ export default class FireStash extends AbstractFireStash {
     // Here we build our new local cache for the collection.
     const data: Record<string, IFireStashPage> = {};
 
+    let i = 0;
     for (const doc of update) {
       const page = doc.id;
       const stash = doc.data() as IFireStashPage;
       data[page] = stash;
       const localPage = local[page] = local[page] || { collection, cache: {} };
       for (const [ id, value ] of Object.entries(stash.cache)) {
+        !(++i % GET_PAGINATION_SIZE) && await new Promise(r => setTimeout(r, 25));
         // If we have the same cache generation id, we already have the latest (likely from a local update). Skip.
         if (localPage.cache[id] === value) { continue; }
         localPage.cache[id] = value;
@@ -535,10 +541,10 @@ export default class FireStash extends AbstractFireStash {
     if (!this.options.lowMem) {
       const batch = this.level.batch();
       batch.put(collection, stringify(local));
+      let i = 0;
       for (const [ collection, id ] of modified) {
-        const obj = await this.safeGet(collection, id) || Buffer.from('1{}');
-        setDirty(obj);
-        batch.put(`${collection}/${id}`, obj);
+        (++i% 5) && new Promise(r => setTimeout(r, 10));
+        await (this.level as LevelSQLite).markDirty(`${collection}/${id}`);
       }
       await batch.write();
     }
@@ -628,6 +634,7 @@ export default class FireStash extends AbstractFireStash {
    */
   private watcherStarters: Record<string, undefined | true | Promise<() => void> | undefined> = {};
   async watch(collection: string): Promise<() => void> {
+    if (collection === 'people') { return () => { 1; }; }
     // If we call this function on repeat, make sure we wait for the first call to be resolve.
     if (this.watcherStarters[collection]) { await this.watcherStarters[collection]; }
 
@@ -782,55 +789,105 @@ export default class FireStash extends AbstractFireStash {
     catch (_err) { return null; }
   }
 
-  private async fetchAllFromFirebase<T=object>(collection: string, idSet: Set<string>): Promise<FirebaseFirestore.DocumentSnapshot<T>[]> {
-    // Fetch all our updated documents.
+  private PENDING_FETCHES: Map<string, Promise<FirebaseFirestore.DocumentSnapshot<object>>> = new Map()
+  private async fetchAllFromFirebase<T=object>(collection: string, idSet: Set<string>): Promise<Record<string, T>> {
     const start = Date.now();
-    const documents: FirebaseFirestore.DocumentSnapshot<T>[] = [];
-    let requestPageSize = MAX_READ_SIZE;
-    let missCount = 0;
-    // Retry getAll fetches at least three times. getAll in firebase is unreliable.
-    // You'll get most of the object very quickly, but some may take a second request.
-    while (idSet.size && requestPageSize > 1) {
-      const ids = [...idSet];
-      this.log.info(`[FireStash] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
-      const promises: Promise<FirebaseFirestore.DocumentSnapshot<T>[]>[] = [];
-      for (let i = 0; i < Math.ceil(ids.length / requestPageSize); i++) {
-        // this.log.info(`[FireStash] Fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
-        const p = this.db.getAll(
-          ...ids.slice(i * requestPageSize, (i + 1) * requestPageSize).map((id) => {
-            this.emit('fetch', collection, id);
-            return this.db.collection(collection).doc(id);
-          }),
-        ) as Promise<FirebaseFirestore.DocumentSnapshot<T>[]>;
-        promises.push(p);
-        // Force get serialization since grpc can panic with too many open connections.
-        try { await p; }
-        catch { /* Rejection appropriately handled later. */ }
-        // this.log.info(`[FireStash] Done fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
+    this.log.info(`[FireStash] Fetching ${idSet.size} "${collection}" records from remote starting at ${start}.`);
+    const promises: Promise<FirebaseFirestore.DocumentSnapshot<T>>[] = Array.from(idSet).map(async id => {
+      if (!this.PENDING_FETCHES.has(`${collection}/${id}`)) {
+        this.PENDING_FETCHES.set(`${collection}/${id}`, this.db.collection(collection).doc(id).get())
       }
+      return this.PENDING_FETCHES.get(`${collection}/${id}`) as Promise<FirebaseFirestore.DocumentSnapshot<T>>;
+    })
 
-      const resolutions = await Promise.allSettled(promises);
+    // Insert all stashes and docs into the local store.
+    const out: Record<string, T> = {};
+    const batch = this.level.batch();
+    const resolutions = await Promise.allSettled(promises);
 
-      for (let i = 0; i < resolutions.length; i++) {
-        const res = resolutions[i];
-        if (res.status === 'rejected') {
-          this.log.error(`[FireStash] Error fetching results page ${i} ${idSet.size} "${collection}" records from remote on attempt ${missCount + 1}.`, res.reason);
+    for (const id of idSet) {
+      this.PENDING_FETCHES.delete(`${collection}/${id}`);
+      this.emit('fetch', collection, id);
+    }
+    
+    for (let i = 0; i < resolutions.length; i++) {
+      const res = resolutions[i];
+      if (res.status === 'rejected') {
+        this.log.error(`[FireStash] Error fetching a document for "${collection}" from remote.`, res.reason);
+      }
+      else {
+        const id = res.value.id;
+        const obj = out[id] = res.value.data() as T;
+        if (obj) {
+          const key = `${collection}/${id}`;
+          const data = stringify(obj);
+          setClean(data);
+          batch.put(key, data);
         }
         else {
-          const docs = res.value;
-          for (const data of docs) {
-            documents.push(data);
-            idSet.delete(data.id);
-          }
+          batch.del(id);
         }
       }
-
-      requestPageSize = Math.round(requestPageSize / 3); // With this magic math, we get up to 6 tries to get this right!
-      missCount += 1;
     }
-    this.log.info(`[FireStash] Finished fetching ${documents.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+    batch.write(); // Fire and forget
 
-    return documents as FirebaseFirestore.DocumentSnapshot<T>[];
+    this.log.info(`[FireStash] Finished fetching ${promises.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+    return out;
+
+    // // Fetch all our updated documents.
+    // const documents: FirebaseFirestore.DocumentSnapshot<T>[] = [];
+    // let requestPageSize = MAX_READ_SIZE;
+    // let missCount = 0;
+
+    // // Retry getAll fetches at least three times. getAll in firebase is unreliable.
+    // // You'll get most of the object very quickly, but some may take a second request.
+    // while (idSet.size && requestPageSize > 1) {
+    //   const ids = [...idSet];
+    //   this.log.info(`[FireStash] Fetching ${ids.length} "${collection}" records from remote. Attempt ${missCount + 1}.`);
+    //   const promises: Promise<FirebaseFirestore.DocumentSnapshot<T>[]>[] = [];
+    //   for (let i = 0; i < Math.ceil(ids.length / requestPageSize); i++) {
+    //     let fetching = new Set();
+    //     // this.log.info(`[FireStash] Fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
+    //     const toFetch = ids.slice(i * requestPageSize, (i + 1) * requestPageSize).map((id) => {
+    //       // if (this.PENDING_FETCHES.has(id)) {
+    //       //   idSet.delete(id);
+    //       //   return null;
+    //       // }
+    //       // this.PENDING_FETCHES.add(id);
+    //       fetching.add(id);
+    //       this.emit('fetch', collection, id);
+    //       return this.db.collection(collection).doc(id);
+    //     }).filter(Boolean) as DocumentReference<DocumentData>[];
+    //     const p = toFetch.length ? this.db.getAll(...toFetch) as Promise<FirebaseFirestore.DocumentSnapshot<T>[]> : Promise.resolve([]);
+    //     promises.push(p);
+    //     // Force get serialization since grpc can panic with too many open connections.
+    //     try { await p; }
+    //     catch { /* Rejection appropriately handled later. */ }
+    //     for (const id of fetching) {
+    //       this.PENDING_FETCHES.delete(id);
+    //     }
+    //     // this.log.info(`[FireStash] Done fetching page ${i + 1}/${Math.ceil(ids.length / requestPageSize)} for "${collection}".`);
+    //   }
+
+    //   const resolutions = await Promise.allSettled(promises);
+
+    //   for (let i = 0; i < resolutions.length; i++) {
+    //     const res = resolutions[i];
+    //     if (res.status === 'rejected') {
+    //       this.log.error(`[FireStash] Error fetching results page ${i} ${idSet.size} "${collection}" records from remote on attempt ${missCount + 1}.`, res.reason);
+    //     }
+    //     else {
+    //       const docs = res.value;
+    //       for (const data of docs) {
+    //         documents.push(data);
+    //         idSet.delete(data.id);
+    //       }
+    //     }
+    //   }
+
+    //   requestPageSize = Math.round(requestPageSize / 3); // With this magic math, we get up to 6 tries to get this right!
+    //   missCount += 1;
+    // }
   }
 
   /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
@@ -860,11 +917,8 @@ export default class FireStash extends AbstractFireStash {
     else if (ids.size > 0 && ids.size <= 30) {
       for (const id of idArr) {
         const record = await this.safeGet(collection, id);
-        if (record && isClean(record) && !this.options.lowMem) {
-          yield [ id, reify<T>(record) ];
-        }
-        else if (record && isDirty(record)) {
-          modified.add(id);
+        if (record) {
+          isDirty(record) ? modified.add(id) : yield [ id, reify<T>(record) ];
         }
         else {
           await this.hasKey(collection, id) && modified.add(id);
@@ -878,6 +932,7 @@ export default class FireStash extends AbstractFireStash {
         // Slightly faster to request the keys as strings instead of buffers.
         const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false, filter });
         for await (const [id] of iterator as unknown as AsyncIterableIterator<string>) {
+          if (id.slice(sliceIdx).includes('/')) { continue; }
           if (!id || (id.slice(0, sliceIdx) !== collectionPrefix)) { break; }
           // If is in the provided ID set, is not the collection itself, queue a get for this key
           if ((!ids.size || ids.has(id)) && id !== collection) { toGet.push(id); }
@@ -888,6 +943,7 @@ export default class FireStash extends AbstractFireStash {
       let records: (Buffer | undefined)[] = [];
       for (const id of toGet) {
         if (done % GET_PAGINATION_SIZE === 0) {
+          await new Promise(r => setTimeout(r, 25));
           records = await this.level.getMany(toGet.slice(done, done + GET_PAGINATION_SIZE), { asBuffer: true });
         }
 
@@ -908,12 +964,9 @@ export default class FireStash extends AbstractFireStash {
           // If dirty, queue for fetch, otherwise add to our JSON return.
           else {
             try {
+              if (filter && !record.includes(filter)) { continue; }
               // Faster than one big parse at end.
-              if (isDirty(record)) { modified.add(key); }
-              else {
-                if (filter && !record.includes(filter)) { continue; }
-                yield [ key, reify<T>(record) ];
-              }
+              isDirty(record) ? modified.add(key) : yield [ key, reify<T>(record) ];
             }
             catch (err) {
               this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
@@ -932,24 +985,10 @@ export default class FireStash extends AbstractFireStash {
     }
 
     if (modified.size) {
-      const documents = await this.fetchAllFromFirebase(collection, modified);
-      // Insert all stashes and docs into the local store.
-      const batch = this.level.batch();
-      for (const doc of documents) {
-        const id = `${collection}/${doc.id}`;
-        const obj = (doc.data() as T | undefined) || null;
-        if (obj) {
-          const data = stringify(obj);
-          setClean(data);
-          batch.put(id, data);
-          if (filter && !data.includes(filter)) { continue; }
-          yield [ doc.id, obj ];
-        }
-        else {
-          batch.del(id);
-        }
+      const out = await this.fetchAllFromFirebase<T>(collection, modified);
+      for (const message of Object.entries(out)) {
+        yield message;
       }
-      await batch.write();
     }
   }
 
@@ -990,11 +1029,8 @@ export default class FireStash extends AbstractFireStash {
       else if (ids.size > 0 && ids.size <= 30) {
         for (const id of idArr) {
           const record = await this.safeGet(collection, id);
-          if (record && isClean(record) && !this.options.lowMem) {
-            out[id] = reify<T>(record);
-          }
-          else if (record && isDirty(record)) {
-            modified.add(id);
+          if (record) {
+            isDirty(record) ? modified.add(id) : (out[id] = reify<T>(record));
           }
           else {
             await this.hasKey(collection, id) && modified.add(id);
@@ -1008,6 +1044,7 @@ export default class FireStash extends AbstractFireStash {
           // Slightly faster to request the keys as strings instead of buffers.
           const iterator = this.level.iterator({ gt: collection, values: false, keys: true, keyAsBuffer: false, valueAsBuffer: false });
           for await (const [id] of iterator as unknown as AsyncIterableIterator<string>) {
+            if (id.slice(sliceIdx).includes('/')) { continue; }
             if (!id || (id.slice(0, sliceIdx) !== collectionPrefix)) { break; }
             // If is in the provided ID set, is not the collection itself, queue a get for this key
             if ((!ids.size || ids.has(id)) && id !== collection) { toGet.push(id); }
@@ -1018,6 +1055,7 @@ export default class FireStash extends AbstractFireStash {
         let records: (Buffer | undefined)[] = [];
         for (const id of toGet) {
           if (done % GET_PAGINATION_SIZE === 0) {
+            await new Promise(r => setTimeout(r, 10));
             records = await this.level.getMany(toGet.slice(done, done + GET_PAGINATION_SIZE), { asBuffer: true });
           }
 
@@ -1037,8 +1075,8 @@ export default class FireStash extends AbstractFireStash {
           // If dirty, queue for fetch, otherwise add to our JSON return.
           else {
             try {
-              out[key] = reify<T>(record); // Faster than one big parse at end.
-              isDirty(record) && modified.add(key);
+              // Faster than one big parse at end.
+              isDirty(record) ? modified.add(key) : out[key] = reify<T>(record);
             }
             catch (err) {
               this.log.error(`[FireStash] Error parsing batch get for '${collection}/${key}'.`, err);
@@ -1048,22 +1086,10 @@ export default class FireStash extends AbstractFireStash {
         }
       }
       if (modified.size) {
-        const documents = await this.fetchAllFromFirebase(collection, modified);
-        // Insert all stashes and docs into the local store.
-        const batch = this.level.batch();
-        for (const doc of documents) {
-          const id = `${collection}/${doc.id}`;
-          const obj = out[doc.id] = (doc.data() as T | undefined) || null;
-          if (obj) {
-            const data = stringify(obj);
-            setClean(data);
-            batch.put(id, data);
-          }
-          else {
-            batch.del(id);
-          }
+        const docs = await this.fetchAllFromFirebase<T>(collection, modified);
+        for (const [id, obj] of Object.entries(docs)) {
+          out[id] = obj;
         }
-        await batch.write();
       }
 
       this.getRequestsMemo.delete(memoKey);
@@ -1085,14 +1111,19 @@ export default class FireStash extends AbstractFireStash {
       for (const [ key, updates ] of records) {
         const id = `${collection}/${key}`;
         if (collection && key && updates?.size) {
-          let localObj: Buffer | null = await this.safeGet(collection, key) || null;
-          let val: object | null = localObj ? reify(localObj) : {};
-          for (const obj of updates) {
-            val = (obj === DELETE_RECORD) ? null : deepMerge(val, obj, { arrayMerge: overwriteMerge });
+          try {
+            let localObj: Buffer | null = await this.safeGet(collection, key) || null;
+            let val: object | null = localObj ? reify(localObj) : {};
+            for (const obj of updates) {
+              val = (obj === DELETE_RECORD) ? null : deepMerge(val, obj, { arrayMerge: overwriteMerge });
+            }
+            localObj = stringify(val);
+            localObj && setClean(localObj);
+            (localObj === null) ? batch.del(id) : batch.put(id, localObj);
           }
-          localObj = stringify(val);
-          localObj && setClean(localObj);
-          (localObj === null) ? batch.del(id) : batch.put(id, localObj);
+          catch (err) {
+            this.log.error('[FireStash] Error draining event:', err);
+          }
         }
         this.emit(id, collection, [key]);
         keyIds.push(key);
