@@ -313,6 +313,9 @@ export default class FireStash extends AbstractFireStash {
                 docCount += 1; // +1 for object delete
               }
               else if (obj) {
+                if (!this.options.lowMem) {
+                  await (this.level as LevelSQLite).markDirty(`${collection}/${key}`)
+                }
                 page.cache[key] = (page.cache[key] || 0) + 1;
                 ensureFirebaseSafe(obj, FieldValue);
                 docUpdates.push([ 'set', `${collection}/${key}`, obj ]);
@@ -322,7 +325,7 @@ export default class FireStash extends AbstractFireStash {
                 if (!this.options.lowMem) {
                   await (this.level as LevelSQLite).markDirty(`${collection}/${key}`)
                 }
-                page.cache[key] = (page.cache[key] || 0);
+                page.cache[key] = (page.cache[key] || 0) + 1;
                 const keys = events.get(collection) || new Set();
                 keys.add(key);
                 events.set(collection, keys);
@@ -798,13 +801,12 @@ export default class FireStash extends AbstractFireStash {
         this.PENDING_FETCHES.set(`${collection}/${id}`, this.db.collection(collection).doc(id).get())
       }
       return this.PENDING_FETCHES.get(`${collection}/${id}`) as Promise<FirebaseFirestore.DocumentSnapshot<T>>;
-    })
+    });
 
     // Insert all stashes and docs into the local store.
     const out: Record<string, T> = {};
     const batch = this.level.batch();
     const resolutions = await Promise.allSettled(promises);
-
     for (const id of idSet) {
       this.PENDING_FETCHES.delete(`${collection}/${id}`);
       this.emit('fetch', collection, id);
@@ -829,7 +831,7 @@ export default class FireStash extends AbstractFireStash {
         }
       }
     }
-    batch.write(); // Fire and forget
+    await batch.write();
 
     this.log.info(`[FireStash] Finished fetching ${promises.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
     return out;
@@ -1050,7 +1052,6 @@ export default class FireStash extends AbstractFireStash {
             if ((!ids.size || ids.has(id)) && id !== collection) { toGet.push(id); }
           }
         }
-
         let done = 0;
         let records: (Buffer | undefined)[] = [];
         for (const id of toGet) {

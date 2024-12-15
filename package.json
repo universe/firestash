@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "5.0.5",
+  "version": "5.0.6",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "license": "MIT",
@@ -12,7 +12,7 @@
     "test": "firebase emulators:exec --ui 'yarn clean-mocha'",
     "lint": "eslint **/*.ts",
     "lint:fix": "eslint **/*.ts --fix",
-    "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test/sqlite.js",
+    "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test",
     "clean-mocha": "mocha -r dotenv/config dist/test",
     "deploy": "NODE_ENV=production firebase deploy",
     "emulate": "firebase emulators:start"
