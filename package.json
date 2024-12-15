@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "5.0.6",
+  "version": "6.0.1",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "license": "MIT",
@@ -12,6 +12,7 @@
     "test": "firebase emulators:exec --ui 'yarn clean-mocha'",
     "lint": "eslint **/*.ts",
     "lint:fix": "eslint **/*.ts --fix",
+    "profile": "node --inspect-brk=9000 ./node_modules/mocha/bin/mocha -r dotenv/config dist/test",
     "mocha": "0x -o ./node_modules/mocha/bin/mocha -r dotenv/config dist/test",
     "clean-mocha": "mocha -r dotenv/config dist/test",
     "deploy": "NODE_ENV=production firebase deploy",
@@ -28,30 +29,29 @@
     "dist/src"
   ],
   "dependencies": {
-    "deepmerge": "^4.2.2",
-    "lru-cache": "^7.10.1",
-    "nanoid": "^3.1.30"
+    "deepmerge": "^4.3.1",
+    "nanoid": "^5.0.5"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.3.0",
+    "firebase": "~10.13.0",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
   "peerDependencies": {
     "better-sqlite3": "^11.3.0",
     "firebase-admin": "*",
+    "firebase": "~10.13.0",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
   "devDependencies": {
-    "0x": "^5.1.2",
     "@commitlint/cli": "^8.2.0",
     "@commitlint/config-conventional": "^8.2.0",
-    "@firebase/rules-unit-testing": "^1.3.5",
+    "@firebase/rules-unit-testing": "^2.0.7",
     "@types/better-sqlite3": "^7.6.8",
     "@types/chai": "^4.2.15",
     "@types/dotenv": "^6.1.1",
-    "@types/leveldown": "^4.0.3",
     "@types/levelup": "^5.1.1",
     "@types/memdown": "^3.0.0",
     "@types/mocha": "^8.2.2",
@@ -59,27 +59,28 @@
     "@types/rocksdb": "^3.0.1",
     "@typescript-eslint/eslint-plugin": "^5.22.0",
     "@typescript-eslint/parser": "^5.22.0",
+    "0x": "^5.1.2",
     "better-sqlite3": "^11.3.0",
     "chai": "^4.3.4",
-    "dotenv": "^8.0.0",
+    "dotenv": "^16.4.4",
     "eslint": "8.35.0",
-    "eslint-config-standard": "^16.0.3",
     "eslint-config-standard-preact": "^1.1.6",
+    "eslint-config-standard": "^16.0.3",
     "eslint-plugin-import": "^2.26.0",
     "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-promise": "^6.0.0",
     "eslint-plugin-react": "^7.29.4",
     "eslint-plugin-standard": "^4.0.1",
-    "firebase-admin": "^11.11.1",
-    "firebase-tools": "^13.5.2",
+    "firebase": "~10.6.0",
+    "firebase-admin": "^12.3.1",
+    "firebase-tools": "^13.29.1",
     "husky": "^8.0.3",
     "isomorphic-fetch": "^3.0.0",
-    "mocha": "^8.3.2",
-    "typescript": "^4.9.0",
-    "watch": "^1.0.2",
-    "leveldown": "^6.1.1",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1",
-    "rocksdb": "^5.2.1"
+    "mocha": "^8.3.2",
+    "rocksdb": "^5.2.1",
+    "typescript": "^4.9.0",
+    "watch": "^1.0.2"
   }
 }

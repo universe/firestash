@@ -40,6 +40,7 @@ function initDb(path: string, readonly: boolean): Database {
   return db;
 }
 
+
 export default class LevelSQLite {
   public readonly path: string;
   public readonly iterDb: Database;

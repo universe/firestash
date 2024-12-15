@@ -1,26 +1,26 @@
 import 'dotenv/config';
+
 import * as path from 'path';
-import { assert } from 'chai';
+import * as assert from 'assert';
 import { performance } from 'perf_hooks';
 import { fileURLToPath } from 'url';
 
-import FireStash from './lib.js';
-
+import FireStash from '../src/lib.js';
 
 const projectId = 'fire-stash';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 async function run() {
   let appId = 0;
-  const fireStash = new FireStash(projectId, { directory: path.join(__dirname, String(appId++)) });
+  const fireStash = new FireStash({ projectId }, { directory: path.join(__dirname, String(appId++)) });
 
   const promises: Promise<void>[] = [];
-  const bigString = 'x'.repeat(30);
+  const bigString = 'x'.repeat(30 * 1024);
   const ids: string[] = [];
   performance.mark('updateStart');
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 15000; i++) {
     ids.push(`id${i}`);
-    promises.push(fireStash.update('bulkcollection', `id${i}`, { id: bigString + i }));
+    promises.push(fireStash.update('bulkcollection', `id${i}`, { id: bigString }));
   }
   console.log('awaiting');
   await Promise.allSettled(promises);
@@ -36,17 +36,17 @@ async function run() {
   performance.mark('bulkGetEnd');
   performance.measure('bulkGet', 'bulkGetStart', 'bulkGetEnd');
   console.log('got', Object.keys(res).length);
-  const done = performance.now();
+  let done = performance.now();
 
-  assert.strictEqual(Object.keys(res).length, 100, 'Fetches all values');
+  assert.strictEqual(Object.keys(res).length, 15000, 'Fetches all values');
   console.log('time', done - now);
   // assert.ok(done - now < 3000, 'Get time is not blown out.'); // TODO: 1.5s should be the goal here...
 
   now = performance.now();
-  const res2 = fireStash.stream('bulkcollection', ids);
-  for await (const foo of res2) {
-    console.log(foo);
-  }
+  const res2 = await fireStash.get('bulkcollection', ids);
+  done = performance.now();
+  console.log('fetched', done - now);
+  assert.strictEqual(Object.keys(res2).length, 15000, 'Fetches all values');
   process.exit(0);
   // assert.ok(done - now < 3000, 'Get time is not blown out.');
 }

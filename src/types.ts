@@ -1,14 +1,35 @@
-import type Firebase from 'firebase-admin';
+import 'firebase/compat/auth';
+import 'firebase/compat/firestore';
+import type { FirebaseApp } from 'firebase/app';
+import type { Firestore } from 'firebase/firestore';
 import { EventEmitter } from 'events';
 
-export type ServiceAccount = Firebase.ServiceAccount;
+// We base64 encode page keys to safely represent deep collections, who's paths contain '/', in a flat list.
+function encode(key: string) {
+  return Buffer.from(key).toString('base64').replace(/=/g, '').replace(/\//g, '.');
+}
+
+export function cacheKey(collection: string, page: number) { return encode(`${collection}-${page}`); }
+
+export type FirebaseConfig = {
+  projectId: string;
+  apiKey?: string;
+  appId?: string;
+  authDomain?: string;
+  databaseURL?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  measurementId?: string;
+};
 
 export interface FireStashOptions {
-  datastore: 'sqlite' | 'rocksdb' | 'leveldown' | 'memdown';
+  datastore: 'sqlite' | 'memdown';
   readOnly: boolean;
   lowMem: boolean;
   worker: boolean;
   directory: string | null;
+  customToken: string | null;
+  console: typeof console;
 }
 
 export interface IFireStashPage<T = number> {
@@ -22,11 +43,13 @@ const DEFAULT_OPTIONS: FireStashOptions = {
   lowMem: false,
   worker: true,
   directory: null,
+  customToken: null,
+  console: console,
 };
 
 export interface IFireStash {
-  app: Firebase.app.App;
-  db: Firebase.firestore.Firestore;
+  app: FirebaseApp;
+  db: Firestore;
   cacheKey(collection: string, page: number): string;
   watchers(): Promise<string[]>;
   allSettled(): Promise<void>;
@@ -54,12 +77,11 @@ declare interface AbstractFireStash {
 }
 
 abstract class AbstractFireStash extends EventEmitter implements IFireStash {
-  protected project: ServiceAccount | string | null;
+  protected project: FirebaseConfig;
   protected options: FireStashOptions = { ...DEFAULT_OPTIONS };
 
-  public readonly abstract app: Firebase.app.App;
-  public readonly abstract db: Firebase.firestore.Firestore;
-  public readonly abstract firebase: typeof Firebase;
+  public readonly abstract app: FirebaseApp;
+  public readonly abstract db: Firestore;
 
   /**
    * Create a new FireStash. Binds to the app database provided. Writes stash backups to disk if directory is provided.
@@ -67,7 +89,7 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
    * @param app The Firebase App Instance.
    * @param directory The cache backup directory (optional)
    */
-  constructor(project: ServiceAccount | string | null, options?: Partial<FireStashOptions> | undefined) {
+  constructor(project: FirebaseConfig, options?: Partial<FireStashOptions> | undefined) {
     super();
     this.project = project;
     this.options = Object.assign(this.options, options);
