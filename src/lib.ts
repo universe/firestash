@@ -637,7 +637,6 @@ export default class FireStash extends AbstractFireStash {
    */
   private watcherStarters: Record<string, undefined | true | Promise<() => void> | undefined> = {};
   async watch(collection: string): Promise<() => void> {
-    if (collection === 'people') { return () => { 1; }; }
     // If we call this function on repeat, make sure we wait for the first call to be resolve.
     if (this.watcherStarters[collection]) { await this.watcherStarters[collection]; }
 
