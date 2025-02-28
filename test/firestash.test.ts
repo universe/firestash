@@ -112,7 +112,7 @@ describe('Connector', function() {
           cache[`id${i}`] = 1;
           objects[`collection2/id${i}`] = { id: i };
           if (i % 500 === 0) {
-            console.log('WRITE', i, '/', 15000)
+            console.log('Writing:', i, '/', 15000)
             await batch.commit();
             batch = writeBatch(fireStash.db);
           }
@@ -490,13 +490,13 @@ describe('Connector', function() {
         cache[`id${i}`] = 1;
         objects[`collection2/id${i}`] = { id: i };
         if (i % 500 === 0) {
-          console.log('WRITE', i, '/', COUNT);
+          console.log('Writing', i, '/', COUNT);
           promises.push(batch.commit());
           batch = writeBatch(fireStash.db);
         }
       }
       await batch.commit();
-      console.log('WRITE', COUNT, '/', COUNT);
+      console.log('Writing:', COUNT, '/', COUNT);
       await Promise.allSettled(promises);
       await fireStash.allSettled();
       console.log('All Settled');
@@ -523,7 +523,7 @@ describe('Connector', function() {
       assert.ok(page0Count === COUNT, 'Initial cache overflows are simply append only.');
       assert.ok(page1Count === 1, 'Initial cache overflows are simply append only.');
 
-      console.log("AHH BALANCE");
+      console.log("Balancing");
       await fireStash.balance('collection2');
       dat2 = await getDocs(query(collection(fireStash.db, 'firestash'), where('collection', '==', 'collection2')));
       page0Count = Object.keys(dat2.docs[0]?.data()?.cache || {}).length;
@@ -764,7 +764,7 @@ describe('Connector', function() {
     });
 
     it('throttles listener when updates exceed a consistent one per second and updates', async function() {
-      this.timeout(10000);
+      this.timeout(20000);
       let called = 0;
       const cacheKey = fireStash.cacheKey('contacts', 0);
       await fireStash.update('contacts', 'id1');
@@ -774,14 +774,15 @@ describe('Connector', function() {
       const cache = (await getDoc(doc(fireStash.db, 'firestash', cacheKey))).data();
       assert.deepStrictEqual(await fireStash.stash('contacts'), cache, 'Local and remote are synced');
       if (!cache) throw new Error('No Cache Object');
-
+      await new Promise(resolve => setTimeout(resolve, 5000)); // To make sure we start in the subscription state.
       for (let i = 0; i < 30; i++) {
         cache.cache.id1++;
         await setDoc(doc(fireStash.db, 'firestash', cacheKey), cache, { merge: true });
         await wait(200);
       }
       await fireStash.allSettled();
-      assert.strictEqual(called, 7, 'Listens for remote updates');
+      await wait(3000);
+      assert.strictEqual(called, 8, 'Listens for remote updates');
     });
 
     it('batches many update calls', async function() {

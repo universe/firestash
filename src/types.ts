@@ -50,6 +50,7 @@ const DEFAULT_OPTIONS: FireStashOptions = {
 export interface IFireStash {
   app: FirebaseApp;
   db: Firestore;
+  ready(): Promise<void>;
   cacheKey(collection: string, page: number): string;
   watchers(): Promise<string[]>;
   allSettled(): Promise<void>;
@@ -95,6 +96,14 @@ abstract class AbstractFireStash extends EventEmitter implements IFireStash {
     this.options = Object.assign(this.options, options);
   }
 
+  /**
+   * Resolves when Firebase and SQLite are fully bound and authenticated.
+   */
+  abstract ready(): Promise<void>;
+
+  /**
+   * Given a collection and page ID, return the cache key.
+   */
   abstract cacheKey(collection: string, page: number): string;
 
   /**

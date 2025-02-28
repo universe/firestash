@@ -1,6 +1,6 @@
 {
   "name": "firestash",
-  "version": "6.0.1",
+  "version": "6.0.4",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "license": "MIT",
@@ -33,15 +33,15 @@
     "nanoid": "^5.0.5"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^11.3.0",
-    "firebase": "~10.13.0",
+    "better-sqlite3": "^11.8.0",
+    "firebase": "^11.3.0",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
   "peerDependencies": {
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^11.8.0",
     "firebase-admin": "*",
-    "firebase": "~10.13.0",
+    "firebase": "^11.3.0",
     "levelup": "^5.1.1",
     "memdown": "^6.1.1"
   },
@@ -60,7 +60,7 @@
     "@typescript-eslint/eslint-plugin": "^5.22.0",
     "@typescript-eslint/parser": "^5.22.0",
     "0x": "^5.1.2",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^11.8.0",
     "chai": "^4.3.4",
     "dotenv": "^16.4.4",
     "eslint": "8.35.0",
@@ -71,9 +71,9 @@
     "eslint-plugin-promise": "^6.0.0",
     "eslint-plugin-react": "^7.29.4",
     "eslint-plugin-standard": "^4.0.1",
-    "firebase": "~10.6.0",
+    "firebase": "^11.3.0",
     "firebase-admin": "^12.3.1",
-    "firebase-tools": "^13.29.1",
+    "firebase-tools": "^13.30.0",
     "husky": "^8.0.3",
     "isomorphic-fetch": "^3.0.0",
     "levelup": "^5.1.1",

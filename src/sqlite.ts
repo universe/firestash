@@ -183,7 +183,7 @@ export default class LevelSQLite {
           // Time slice our writes so we don't block toooooo much.
           if (idx % PAGE_SIZE === 0) await new Promise(r => setTimeout(r, 10));
           const [key, value] = ops[idx];
-          value ? this.put(key, value) : this.del(key);
+          await (value ? this.put(key, value) : this.del(key));
         }
       },
     };

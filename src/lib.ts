@@ -33,6 +33,7 @@ import { isMainThread } from 'worker_threads';
 
 import LevelSQLite from './sqlite.js';
 import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig } from './types.js';
+import { PromisePool } from './PromisePool.js';
 
 export type { IFireStash, IFireStashPage, FireStashOptions, FirebaseConfig };
 
@@ -164,6 +165,7 @@ export default class FireStash extends AbstractFireStash {
     this.level._nextTick = setImmediate;
   }
 
+  public ready(): Promise<void> { return this.authPromise || Promise.resolve(); }
   public cacheKey(collection: string, page: number) { return cacheKey(collection, page); }
 
   public async watchers() { return [...new Set(this.#watchers.keys())]; }
@@ -782,36 +784,36 @@ export default class FireStash extends AbstractFireStash {
   }
 
   // TODO: Unfortunatly, with the client side APIs, large document fetches take a long time. Can we find a more performant way to do this?
-  private PENDING_FETCHES: Map<string, Promise<DocumentSnapshot<object>>> = new Map()
-  private async fetchAllFromFirebase<T=object>(collection: string, idSet: Set<string>): Promise<Record<string, T>> {
+  // Note for future readers: as of Feb 2025, firestore IN queries are *much* slower than many parallel docuent fetches.
+  // however, GRPC will crap out if too many requests are made at the same time using client SDKs. So, we need to implement a request pool.
+  // After some testing, 1,000 max concurrent GRPC requests appears to be the magic number to balance concurrency and backpressure.
+  private pool = new PromisePool(1000);
+  private async fetchAllFromFirebase<T=object>(collectionName: string, idSet: Set<string>): Promise<Record<string, T>> {
     const start = Date.now();
-    this.log.info(`[FireStash] Fetching ${idSet.size} "${collection}" records from remote starting at ${start}.`);
-    const promises: Promise<DocumentSnapshot<T>>[] = Array.from(idSet).map(async id => {
-      if (!this.PENDING_FETCHES.has(`${collection}/${id}`)) {
-        this.PENDING_FETCHES.set(`${collection}/${id}`, getDoc(doc(this.db, collection, id)) as unknown as Promise<DocumentSnapshot<object>>)
-      }
-      return this.PENDING_FETCHES.get(`${collection}/${id}`) as Promise<DocumentSnapshot<T>>;
-    });
-
-    // Insert all stashes and docs into the local store.
+    this.log.info(`[FireStash] Fetching ${idSet.size} "${collectionName}" records from remote starting at ${start}.`);
     const out: Record<string, T> = {};
-    const batch = this.level.batch();
-    const resolutions = await Promise.allSettled(promises);
+    let promises: Promise<DocumentSnapshot<T>>[] = [];
     for (const id of idSet) {
-      this.PENDING_FETCHES.delete(`${collection}/${id}`);
-      this.emit('fetch', collection, id);
+      promises.push(this.pool.run(() => {
+        return getDoc(doc(this.db, collectionName, id)) as unknown as Promise<DocumentSnapshot<T>>;
+      }));
     }
-
-    for (let i = 0; i < resolutions.length; i++) {
-      const res = resolutions[i];
+    const batch = this.level.batch();
+    const results = await Promise.allSettled(promises);
+    this.log.info(`[FireStash] Finished fetching ${idSet.size} "${collectionName}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+    promises = [];
+    for (const res of results) {
       if (res.status === 'rejected') {
-        this.log.error(`[FireStash] Error fetching a document for "${collection}" from remote.`, res.reason);
+        this.log.error(`[FireStash] Error fetching a document for "${collectionName}" from remote.`, res.reason);
+        break;
       }
       else {
+        // Insert all stashes and docs into the local store.
         const id = res.value.id;
         const obj = out[id] = res.value.data() as T;
         if (obj) {
-          const key = `${collection}/${id}`;
+          this.emit('fetch', collectionName, id);
+          const key = `${collectionName}/${id}`;
           const data = stringify(obj);
           setClean(data);
           batch.put(key, data);
@@ -823,7 +825,7 @@ export default class FireStash extends AbstractFireStash {
     }
     await batch.write();
 
-    this.log.info(`[FireStash] Finished fetching ${promises.length} "${collection}" records from remote in ${((Date.now() - start) / 1000)}s.`);
+    this.log.info(`[FireStash] Finished saving ${Object.keys(out).length} "${collectionName}" records from remote in ${((Date.now() - start) / 1000)}s.`);
     return out;
 
     // // Fetch all our updated documents.

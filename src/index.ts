@@ -13,15 +13,14 @@ import AbstractFireStash, { cacheKey, IFireStash, IFireStashPage, FireStashOptio
 export { cacheKey, type FireStashOptions, type FirebaseConfig, type IFireStash, type IFireStashPage }
 
 function getDirname() {
-  const parts = fileURLToPath(import.meta.url).split('/');
-  parts.pop();
-  return parts.join('/');
+  return path.dirname(fileURLToPath(import.meta.url));
 }
 
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
 type Awaited<T> = T extends PromiseLike<infer U> ? U : T
 export default class FireStash extends AbstractFireStash {
+  #authPromise: Promise<void> | null = null;
   #worker: ChildProcess | null = null;
   #messageId = 0;
   #tasks: Record<number | string, [(value: any) => void, (err: Error) => void, string]> = {};
@@ -56,7 +55,9 @@ export default class FireStash extends AbstractFireStash {
     // If a custom token was provided, sign the user in. Intentional fire and forget here.
     this.auth = getAuth(this.app);
     process.env.FIREBASE_AUTH_EMULATOR_HOST && connectAuthEmulator(this.auth, `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`);
-    options?.customToken && (signInWithCustomToken(this.auth, options.customToken));
+    if (options?.customToken) {
+      this.#authPromise = signInWithCustomToken(this.auth, options.customToken).then(() => { this.#authPromise = null; });
+    }
 
     // Save ourselves from annoying throws. This cases should be handled in-library anyway.
     this.db = initializeFirestore(this.app, { ignoreUndefinedProperties: true });
@@ -104,6 +105,7 @@ export default class FireStash extends AbstractFireStash {
     });
   }
 
+  public ready(): Promise<void> { return this.#authPromise || Promise.resolve(); }
   public cacheKey(collection: string, page: number): string { return cacheKey(collection, page); }
   public allSettled(): Promise<void> { return this.runInWorker([ 'allSettled', []]); }
   public stash(collection: string): Promise<IFireStashPage> { return this.runInWorker([ 'stash', [collection]]); }
